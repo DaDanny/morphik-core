@@ -20,6 +20,17 @@ from core.logging_config import setup_logging
 worker_process = None
 
 
+def check_redis_accessibility(host="localhost", port=6379):
+    """Check if Redis is accessible at the given host:port."""
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            logging.info(f"Redis is accessible at {host}:{port}")
+            return True
+    except (OSError, socket.error):
+        logging.debug(f"Redis not accessible at {host}:{port}")
+        return False
+
+
 def wait_for_redis(host="localhost", port=6379, timeout=20):
     """
     Wait for Redis to become available.
@@ -48,14 +59,38 @@ def wait_for_redis(host="localhost", port=6379, timeout=20):
 
 
 def check_and_start_redis():
-    """Check if the Redis container is running, start if necessary."""
+    """Check if Redis is accessible, start Docker container only if needed."""
+    # Get Redis configuration from environment
+    redis_host = os.environ.get("REDIS_HOST", "localhost")
+    redis_port = int(os.environ.get("REDIS_PORT", "6379"))
+    
+    # First check if Redis is already accessible (could be system service or existing container)
+    if check_redis_accessibility(redis_host, redis_port):
+        logging.info(f"Redis is already accessible at {redis_host}:{redis_port} - skipping Docker container creation")
+        return
+    
+    # Only try Docker management if Redis is not accessible and we're using localhost
+    # (Don't try to manage Docker if connecting to remote Redis)
+    if redis_host not in ["localhost", "127.0.0.1"]:
+        logging.error(f"Redis is not accessible at {redis_host}:{redis_port} and host is not localhost - cannot auto-start")
+        sys.exit(1)
+    
+    logging.info("Redis not accessible, attempting to start Docker container...")
+    
     try:
         # Check if container exists and is running
         check_running_cmd = ["docker", "ps", "-q", "-f", "name=morphik-redis"]
         running_container = subprocess.check_output(check_running_cmd).strip()
 
         if running_container:
-            logging.info("Redis container (morphik-redis) is already running.")
+            logging.info("Redis container (morphik-redis) is already running but not accessible - checking port binding...")
+            # Container is running but not accessible, might be a port issue
+            inspect_cmd = ["docker", "inspect", "morphik-redis", "--format", "{{.NetworkSettings.Ports}}"]
+            try:
+                port_info = subprocess.check_output(inspect_cmd).decode().strip()
+                logging.info(f"Container port bindings: {port_info}")
+            except subprocess.CalledProcessError:
+                pass
             return
 
         # Check if container exists but is stopped
@@ -68,19 +103,35 @@ def check_and_start_redis():
             logging.info("Redis container started.")
         else:
             logging.info("Creating and starting Redis container (morphik-redis)...")
-            subprocess.run(
-                ["docker", "run", "-d", "--name", "morphik-redis", "-p", "6379:6379", "redis"],
-                check=True,
-                capture_output=True,
-            )
-            logging.info("Redis container created and started.")
+            # Check if port is available before creating container
+            if not check_redis_accessibility("localhost", redis_port):
+                subprocess.run(
+                    ["docker", "run", "-d", "--name", "morphik-redis", "-p", f"{redis_port}:6379", "redis"],
+                    check=True,
+                    capture_output=True,
+                )
+                logging.info("Redis container created and started.")
+            else:
+                logging.error(f"Port {redis_port} appears to be in use by another service")
+                sys.exit(1)
 
     except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to manage Redis container: {e}")
-        logging.error(f"Stderr: {e.stderr.decode() if e.stderr else 'N/A'}")
+        error_msg = e.stderr.decode() if e.stderr else 'N/A'
+        
+        # Check for specific port binding error
+        if "port is already allocated" in error_msg or "address already in use" in error_msg:
+            logging.error(f"Port {redis_port} is already in use. This likely means Redis is running as a system service.")
+            logging.error("Please either:")
+            logging.error("1. Use the existing Redis service (recommended)")
+            logging.error("2. Stop the system Redis service: sudo systemctl stop redis-server")
+            logging.error("3. Configure Morphik to use a different Redis port")
+        else:
+            logging.error(f"Failed to manage Redis container: {e}")
+            logging.error(f"Stderr: {error_msg}")
         sys.exit(1)
     except FileNotFoundError:
         logging.error("Docker command not found. Please ensure Docker is installed and in PATH.")
+        logging.error("Alternatively, ensure Redis is running as a system service.")
         sys.exit(1)
 
 
@@ -252,6 +303,11 @@ def main():
         help="Skip Ollama availability check",
     )
     parser.add_argument(
+        "--skip-redis-setup",
+        action="store_true",
+        help="Skip Redis setup/Docker management (assumes Redis is already running)",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -262,11 +318,12 @@ def main():
     # Set up logging first with specified level
     setup_logging(log_level=args.log.upper())
 
-    # Check and start Redis container
-    check_and_start_redis()
-
-    # Load environment variables from .env file
+    # Load environment variables from .env file FIRST
     load_dotenv()
+
+    # Check and start Redis container (unless skipped)
+    if not args.skip_redis_setup:
+        check_and_start_redis()
 
     # Check if Ollama is required and running
     if not args.skip_ollama_check:
