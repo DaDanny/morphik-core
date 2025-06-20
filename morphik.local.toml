@@ -1,0 +1,110 @@
+# Morphik Local Configuration for cl-private-ai Integration
+# This config integrates with existing Docker Compose services
+
+[api]
+host = "0.0.0.0"
+port = 8000
+reload = true
+
+[auth]
+jwt_algorithm = "HS256"
+dev_mode = true  # Enabled for local development
+dev_entity_id = "dev_user"
+dev_entity_type = "developer"
+dev_permissions = ["read", "write", "admin"]
+
+#### Registered models (configured for our existing Ollama setup)
+[registered_models]
+# Ollama models (pointing to our existing ollama service)
+ollama_phi3 = { model_name = "ollama_chat/phi3:mini", api_base = "http://ollama:11434" }
+ollama_embedding = { model_name = "ollama/nomic-embed-text", api_base = "http://ollama:11434" }
+
+# OpenAI models (if you have API keys)
+openai_gpt4 = { model_name = "gpt-4o-mini" }
+openai_embedding = { model_name = "text-embedding-3-small" }
+
+#### Component configurations ####
+
+[agent]
+model = "ollama_phi3"  # Use our Ollama setup
+
+[completion]
+model = "ollama_phi3"  # Use our existing phi3:mini model
+default_max_tokens = "1000"
+default_temperature = 0.3
+
+[database]
+provider = "postgres"
+# Using our existing PostgreSQL service with morphik user
+user = "postgres"
+password = "postgres"
+database = "private_ai_dev"
+host = "postgres"
+port = 5432
+pool_size = 10
+max_overflow = 15
+pool_recycle = 3600
+pool_timeout = 10
+pool_pre_ping = true
+max_retries = 3
+retry_delay = 1.0
+
+[embedding]
+model = "ollama_embedding"  # Use our existing nomic-embed-text model
+dimensions = 768
+similarity_metric = "cosine"
+
+[parser]
+chunk_size = 6000
+chunk_overlap = 300
+use_unstructured_api = false
+use_contextual_chunking = false
+contextual_chunking_model = "ollama_phi3"
+
+[document_analysis]
+model = "ollama_phi3"
+
+[parser.vision]
+model = "ollama_phi3"
+frame_sample_rate = -1  # Disable frame captioning for now
+
+[reranker]
+use_reranker = false  # Disable for local development
+provider = "flag"
+model_name = "BAAI/bge-reranker-large"
+query_max_length = 256
+passage_max_length = 512
+use_fp16 = true
+device = "cpu"  # Use CPU for Docker compatibility
+
+[storage]
+provider = "local"
+storage_path = "./storage"
+
+[vector_store]
+provider = "pgvector"  # Use PostgreSQL with pgvector
+host = "postgres"
+port = 5432
+user = "postgres"
+password = "postgres"
+database = "private_ai_dev"
+collection_name = "morphik_vectors"
+
+[rules]
+model = "ollama_phi3"
+batch_size = 1024  # Smaller batch size for local development
+
+[morphik]
+enable_colpali = false  # Disable for local development
+mode = "self_hosted"
+api_domain = "localhost:8001"
+
+[pdf_viewer]
+frontend_url = "http://localhost:3000/api/pdf"
+
+[graph]
+model = "ollama_phi3"
+enable_entity_resolution = false  # Disable for simpler local setup
+
+[telemetry]
+enabled = false  # Disable telemetry for local development 
