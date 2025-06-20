@@ -105,8 +105,8 @@ COPY morphik.docker.toml /app/morphik.toml.default
 COPY morphik.toml /app/morphik.toml
 
 # Copy our fixed entrypoint script
-COPY docker-entrypoint-fixed.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+COPY docker-entrypoint-fixed.sh /app/docker-entrypoint-fixed.sh
+RUN chmod +x /app/docker-entrypoint-fixed.sh
 
 # Copy application code
 # pyproject.toml is needed for uv to identify the project context for `uv run`
@@ -128,4 +128,4 @@ LABEL org.opencontainers.image.licenses="MIT"
 EXPOSE 8000
 
 # Set the entrypoint
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
+ENTRYPOINT ["/app/docker-entrypoint-fixed.sh"]
