@@ -6,25 +6,25 @@ services:
       - "8000:8000"
     environment:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-here}
-      - POSTGRES_URI=postgresql+asyncpg://morphik:morphik@postgres:5432/morphik
-      - PGPASSWORD=morphik # Used by internal health checks in the container
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      # Use environment variable for database connection (supports external databases)
+      - POSTGRES_URI=${POSTGRES_URI:-postgresql+asyncpg://morphik:morphik@postgres:5432/morphik}
+      - PGPASSWORD=${PGPASSWORD:-morphik}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      # To use a custom config, create a 'morphik.toml' file locally and uncomment the following line.
-      # - ./morphik.toml:/app/morphik.toml:ro
-      # Persist storage for uploaded files
-      - ./storage:/app/storage
-      # Persist logs
-      - ./logs:/app/logs
+      # Use custom config file (created by startup script)
+      - ./morphik.toml:/app/morphik.toml:ro
+      # Persist storage for uploaded files (on persistent disk)
+      - ./data/storage:/app/storage
+      # Persist logs (on persistent disk)
+      - ./data/logs:/app/logs
       # Cache for HuggingFace models (e.g., rerankers)
       - huggingface_cache:/root/.cache/huggingface
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
+      # No postgres dependency - supports external databases
     networks:
       - morphik-network
     env_file:
@@ -37,22 +37,24 @@ services:
     command: arq core.workers.ingestion_worker.WorkerSettings
     environment:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-here}
-      - POSTGRES_URI=postgresql+asyncpg://morphik:morphik@postgres:5432/morphik
-      - PGPASSWORD=morphik
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      # Use environment variable for database connection (supports external databases)
+      - POSTGRES_URI=${POSTGRES_URI:-postgresql+asyncpg://morphik:morphik@postgres:5432/morphik}
+      - PGPASSWORD=${PGPASSWORD:-morphik}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      # To use a custom config, create a 'morphik.toml' file locally and uncomment the following line.
-      # - ./morphik.toml:/app/morphik.toml:ro
-      - ./storage:/app/storage
-      - ./logs:/app/logs
+      # Use custom config file (created by startup script)
+      - ./morphik.toml:/app/morphik.toml:ro
+      # Persist storage for uploaded files (on persistent disk)
+      - ./data/storage:/app/storage
+      # Persist logs (on persistent disk)
+      - ./data/logs:/app/logs
       - huggingface_cache:/root/.cache/huggingface
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
+      # No postgres dependency - supports external databases
     networks:
       - morphik-network
     env_file:
@@ -72,47 +74,12 @@ services:
     networks:
       - morphik-network
 
-  postgres:
-    # Uses a standard image with the pgvector extension pre-installed
-    image: pgvector/pgvector:pg16
-    container_name: morphik-postgres
-    environment:
-      - POSTGRES_USER=morphik
-      - POSTGRES_PASSWORD=morphik
-      - POSTGRES_DB=morphik
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      # The -d flag is important to specify the database name for the readiness check
-      test: ["CMD-SHELL", "pg_isready -U morphik -d morphik"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks:
-      - morphik-network
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: morphik-ollama
-    # Enable this profile to run Ollama for local models
-    profiles:
-      - ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - morphik-network
+# postgres and ollama services removed - using external CloudSQL and Ollama
 
 networks:
   morphik-network:
     driver: bridge
 
 volumes:
-  postgres_data:
   redis_data:
-  ollama_data:
-  huggingface_cache:
+  huggingface_cache: 
