@@ -103,53 +103,9 @@ ENV PATH="/app/.venv/bin:/usr/local/bin:${PATH}"
 # Create default configuration
 COPY morphik.docker.toml /app/morphik.toml.default
 
-# Create startup script
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-# Copy default config if none exists\n\
-if [ ! -f /app/morphik.toml ]; then\n\
-    cp /app/morphik.toml.default /app/morphik.toml\n\
-fi\n\
-\n\
-# Function to check PostgreSQL\n\
-check_postgres() {\n\
-    if [ -n "$POSTGRES_URI" ]; then\n\
-        echo "Waiting for PostgreSQL..."\n\
-        max_retries=30\n\
-        retries=0\n\
-        until PGPASSWORD=$PGPASSWORD pg_isready -h postgres -U morphik -d morphik; do\n\
-            retries=$((retries + 1))\n\
-            if [ $retries -eq $max_retries ]; then\n\
-                echo "Error: PostgreSQL did not become ready in time"\n\
-                exit 1\n\
-            fi\n\
-            echo "Waiting for PostgreSQL... (Attempt $retries/$max_retries)"\n\
-            sleep 2\n\
-        done\n\
-        echo "PostgreSQL is ready!"\n\
-        \n\
-        # Verify database connection\n\
-        if ! PGPASSWORD=$PGPASSWORD psql -h postgres -U morphik -d morphik -c "SELECT 1" > /dev/null 2>&1; then\n\
-            echo "Error: Could not connect to PostgreSQL database"\n\
-            exit 1\n\
-        fi\n\
-        echo "PostgreSQL connection verified!"\n\
-    fi\n\
-}\n\
-\n\
-# Check PostgreSQL\n\
-check_postgres\n\
-\n\
-# Check if command arguments were passed ($# is the number of arguments)\n\
-if [ $# -gt 0 ]; then\n\
-    # If arguments exist, execute them (e.g., execute "arq core.workers...")\n\
-    exec "$@"\n\
-else\n\
-    # Otherwise, execute the default command (uv run start_server.py)\n\
-    exec uv run uvicorn core.api:app --host $HOST --port $PORT --loop asyncio --http auto --ws auto --lifespan auto\n\
-fi\n\
-' > /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
+# Copy our fixed entrypoint script
+COPY docker-entrypoint-fixed.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
 
 # Copy application code
 # pyproject.toml is needed for uv to identify the project context for `uv run`
