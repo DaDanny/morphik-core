@@ -102,6 +102,7 @@ ENV PATH="/app/.venv/bin:/usr/local/bin:${PATH}"
 
 # Create default configuration
 COPY morphik.docker.toml /app/morphik.toml.default
+COPY morphik.toml /app/morphik.toml
 
 # Copy our fixed entrypoint script
 COPY docker-entrypoint-fixed.sh /app/docker-entrypoint.sh
