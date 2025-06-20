@@ -22,7 +22,7 @@ services:
       # Cache for HuggingFace models (e.g., rerankers)
       - huggingface_cache:/root/.cache/huggingface
       # Mount fixed entrypoint script
-      - ./services/morphik/docker-entrypoint-fixed.sh:/app/docker-entrypoint-fixed.sh:ro
+      - ./docker-entrypoint-fixed.sh:/app/docker-entrypoint-fixed.sh:ro
     entrypoint: ["/app/docker-entrypoint-fixed.sh"]
     depends_on:
       redis:
@@ -55,7 +55,7 @@ services:
       - ./data/logs:/app/logs
       - huggingface_cache:/root/.cache/huggingface
       # Mount fixed entrypoint script
-      - ./services/morphik/docker-entrypoint-fixed.sh:/app/docker-entrypoint-fixed.sh:ro
+      - ./docker-entrypoint-fixed.sh:/app/docker-entrypoint-fixed.sh:ro
     entrypoint: ["/app/docker-entrypoint-fixed.sh"]
     depends_on:
       redis:
