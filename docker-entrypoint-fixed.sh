@@ -18,20 +18,23 @@ check_postgres() {
         DB_NAME=$(echo "$POSTGRES_URI" | sed -n 's|.*/\([^?]*\).*|\1|p')
         
         # Fallback to environment variables if extraction fails
-        DB_HOST=${DB_HOST:-${DB_HOST:-postgres}}
+        DB_HOST=${DB_HOST:-postgres}
         DB_PORT=${DB_PORT:-5432}
         DB_USER=${DB_USER:-${PGUSER:-postgres}}
         DB_NAME=${DB_NAME:-${DB_NAME:-private_ai_dev}}
         
         echo "Connecting to PostgreSQL at $DB_HOST:$DB_PORT as user $DB_USER to database $DB_NAME"
+        echo "Full POSTGRES_URI: $POSTGRES_URI"
         
         until PGPASSWORD=$PGPASSWORD pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER"; do
             retries=$((retries + 1))
             if [ $retries -eq $max_retries ]; then
                 echo "Error: PostgreSQL did not become ready in time"
+                echo "Final connection attempt failed for $DB_HOST:$DB_PORT"
                 exit 1
             fi
             echo "Waiting for PostgreSQL... (Attempt $retries/$max_retries)"
+            echo "$DB_HOST:$DB_PORT - no response"
             sleep 2
         done
         echo "PostgreSQL is ready!"
@@ -47,7 +50,9 @@ check_postgres() {
 check_postgres
 
 if [ $# -gt 0 ]; then
+    echo "Starting with custom command: $@"
     exec "$@"
 else
+    echo "Starting Morphik server..."
     exec uv run uvicorn core.api:app --host ${HOST:-0.0.0.0} --port ${PORT:-8000} --loop asyncio --http auto --ws auto --lifespan auto
 fi 
