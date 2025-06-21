@@ -23,6 +23,7 @@ from core.database.postgres_database import PostgresDatabase
 from core.embedding.colpali_api_embedding_model import ColpaliApiEmbeddingModel
 from core.embedding.colpali_embedding_model import ColpaliEmbeddingModel
 from core.embedding.litellm_embedding import LiteLLMEmbeddingModel
+from core.embedding.ollama_embedding_model import OllamaEmbeddingModel
 from core.parser.morphik_parser import MorphikParser
 from core.reranker.flag_reranker import FlagReranker
 from core.services.document_service import DocumentService
@@ -87,8 +88,18 @@ parser = MorphikParser(
     use_contextual_chunking=settings.USE_CONTEXTUAL_CHUNKING,
 )
 
-embedding_model = LiteLLMEmbeddingModel(model_key=settings.EMBEDDING_MODEL)
-logger.info("Initialized LiteLLM embedding model with model key: %s", settings.EMBEDDING_MODEL)
+# Smart embedding model selection - use direct Ollama client for Ollama models to avoid LiteLLM bugs
+embedding_model_config = settings.REGISTERED_MODELS.get(settings.EMBEDDING_MODEL, {})
+embedding_model_name = embedding_model_config.get("model_name", "")
+
+if "ollama" in embedding_model_name.lower():
+    # Use direct Ollama embedding model to bypass LiteLLM bug
+    embedding_model = OllamaEmbeddingModel(model_key=settings.EMBEDDING_MODEL)
+    logger.info("Initialized direct Ollama embedding model with model key: %s", settings.EMBEDDING_MODEL)
+else:
+    # Use LiteLLM for non-Ollama models
+    embedding_model = LiteLLMEmbeddingModel(model_key=settings.EMBEDDING_MODEL)
+    logger.info("Initialized LiteLLM embedding model with model key: %s", settings.EMBEDDING_MODEL)
 
 completion_model = LiteLLMCompletionModel(model_key=settings.COMPLETION_MODEL)
 logger.info("Initialized LiteLLM completion model with model key: %s", settings.COMPLETION_MODEL)

@@ -730,8 +730,21 @@ async def startup(ctx):
     ctx["parser"] = parser
 
     # Initialize embedding model
-    embedding_model = LiteLLMEmbeddingModel(model_key=settings.EMBEDDING_MODEL)
-    logger.info(f"Initialized LiteLLM embedding model with model key: {settings.EMBEDDING_MODEL}")
+    # Smart embedding model selection - use direct Ollama client for Ollama models to avoid LiteLLM bugs
+    from core.embedding.ollama_embedding_model import OllamaEmbeddingModel
+    
+    embedding_model_config = settings.REGISTERED_MODELS.get(settings.EMBEDDING_MODEL, {})
+    embedding_model_name = embedding_model_config.get("model_name", "")
+
+    if "ollama" in embedding_model_name.lower():
+        # Use direct Ollama embedding model to bypass LiteLLM bug
+        embedding_model = OllamaEmbeddingModel(model_key=settings.EMBEDDING_MODEL)
+        logger.info("Worker: Initialized direct Ollama embedding model with model key: %s", settings.EMBEDDING_MODEL)
+    else:
+        # Use LiteLLM for non-Ollama models
+        embedding_model = LiteLLMEmbeddingModel(model_key=settings.EMBEDDING_MODEL)
+        logger.info("Worker: Initialized LiteLLM embedding model with model key: %s", settings.EMBEDDING_MODEL)
+    
     ctx["embedding_model"] = embedding_model
 
     # Skip initializing completion model and reranker since they're not needed for ingestion
