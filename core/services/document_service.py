@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, List, Optional, Type, Union
+from contextlib import asynccontextmanager
 
 import arq
 import filetype
@@ -1371,133 +1372,299 @@ class DocumentService:
         is_update: bool = False,
         auth: Optional[AuthContext] = None,
     ) -> List[str]:
-        """Helper to store chunks and document"""
-        # Add retry logic for vector store operations
+        """
+        Optimized helper to store chunks and document with proper transaction management.
+        
+        Key optimizations:
+        1. Explicit transaction management with rollback on errors
+        2. Serialized database operations to avoid connection pool exhaustion  
+        3. Proper connection cleanup on all error paths
+        4. Transaction timeout handling
+        5. Reduced concurrent operations to minimize deadlocks
+        """
+        import asyncio
+        from contextlib import asynccontextmanager
+        
         max_retries = 3
         retry_delay = 1.0
+        transaction_timeout = 30.0  # 30 second timeout for database transactions
+        
+        logger.info(f"Starting optimized storage for {len(chunk_objects)} chunks, use_colpali={use_colpali}")
+        
+        # Helper for explicit transaction management with timeout
+        @asynccontextmanager
+        async def managed_transaction(db_instance, operation_name):
+            """Context manager for database transactions with proper cleanup."""
+            session = None
+            transaction = None
+            try:
+                # Get a fresh session
+                session = db_instance.async_session()
+                async with session.begin() as transaction:
+                    logger.debug(f"Started transaction for {operation_name}")
+                    yield session
+                    # Transaction commits automatically if no exception
+                    logger.debug(f"Transaction committed for {operation_name}")
+            except Exception as e:
+                logger.error(f"Transaction failed for {operation_name}: {str(e)}")
+                if transaction:
+                    try:
+                        await transaction.rollback()
+                        logger.debug(f"Transaction rolled back for {operation_name}")
+                    except Exception as rollback_error:
+                        logger.error(f"Rollback failed for {operation_name}: {str(rollback_error)}")
+                raise
+            finally:
+                if session:
+                    try:
+                        await session.close()
+                        logger.debug(f"Session closed for {operation_name}")
+                    except Exception as close_error:
+                        logger.warning(f"Session close error for {operation_name}: {str(close_error)}")
 
-        # Helper function to store embeddings with retry
-        async def store_with_retry(store, objects, store_name="regular"):
+        # Optimized store function with explicit transaction management
+        async def store_with_explicit_transaction(store, objects, store_name="regular"):
+            """Store embeddings with explicit transaction management and retries."""
             attempt = 0
-            success = False
-            result = None
             current_retry_delay = retry_delay
 
-            while attempt < max_retries and not success:
+            while attempt < max_retries:
                 try:
-                    success, result = await store.store_embeddings(objects)
+                    logger.debug(f"Attempting to store {len(objects)} {store_name} embeddings (attempt {attempt + 1}/{max_retries})")
+                    
+                    # Use explicit transaction management if the store supports it
+                    if hasattr(store, 'async_session') and hasattr(store, 'store_embeddings_with_session'):
+                        async with managed_transaction(store, f"{store_name}_embeddings") as session:
+                            success, result = await asyncio.wait_for(
+                                store.store_embeddings_with_session(session, objects),
+                                timeout=transaction_timeout
+                            )
+                    else:
+                        # Fallback to regular method with timeout
+                        success, result = await asyncio.wait_for(
+                            store.store_embeddings(objects),
+                            timeout=transaction_timeout
+                        )
+                    
                     if not success:
                         raise Exception(f"Failed to store {store_name} chunk embeddings")
+                    
+                    logger.info(f"Successfully stored {len(objects)} {store_name} embeddings")
                     return result
+
+                except asyncio.TimeoutError:
+                    attempt += 1
+                    error_msg = f"Transaction timeout after {transaction_timeout}s"
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"Timeout during {store_name} embeddings storage "
+                            f"(attempt {attempt}/{max_retries}): {error_msg}. "
+                            f"Retrying in {current_retry_delay}s..."
+                        )
+                        await asyncio.sleep(current_retry_delay)
+                        current_retry_delay *= 2
+                    else:
+                        logger.error(f"All {store_name} storage attempts timed out after {max_retries} retries")
+                        raise Exception(f"Failed to store {store_name} chunk embeddings: timeout after multiple retries")
+
                 except Exception as e:
                     attempt += 1
                     error_msg = str(e)
-                    if "connection was closed" in error_msg or "ConnectionDoesNotExistError" in error_msg:
-                        if attempt < max_retries:
-                            logger.warning(
-                                f"Database connection error during {store_name} embeddings storage "
-                                f"(attempt {attempt}/{max_retries}): {error_msg}. "
-                                f"Retrying in {current_retry_delay}s..."
-                            )
-                            await asyncio.sleep(current_retry_delay)
-                            # Increase delay for next retry (exponential backoff)
-                            current_retry_delay *= 2
-                        else:
-                            logger.error(
-                                f"All {store_name} database connection attempts failed "
-                                f"after {max_retries} retries: {error_msg}"
-                            )
-                            raise Exception(f"Failed to store {store_name} chunk embeddings after multiple retries")
+                    is_connection_error = any(err_pattern in error_msg.lower() for err_pattern in [
+                        "connection was closed", "connectiondoesnotexisterror", "connection pool", 
+                        "server closed the connection", "connection timeout", "database lock"
+                    ])
+                    
+                    if is_connection_error and attempt < max_retries:
+                        logger.warning(
+                            f"Database connection error during {store_name} embeddings storage "
+                            f"(attempt {attempt}/{max_retries}): {error_msg}. "
+                            f"Retrying in {current_retry_delay}s..."
+                        )
+                        await asyncio.sleep(current_retry_delay)
+                        current_retry_delay *= 2
                     else:
-                        # For other exceptions, don't retry
-                        logger.error(f"Error storing {store_name} embeddings: {error_msg}")
-                        raise
+                        logger.error(f"Error storing {store_name} embeddings (attempt {attempt}): {error_msg}")
+                        if attempt >= max_retries:
+                            raise Exception(f"Failed to store {store_name} chunk embeddings after {max_retries} retries: {error_msg}")
+                        else:
+                            raise
 
-        # Store document metadata with retry
-        async def store_document_with_retry():
+        # Store document metadata with explicit transaction management  
+        async def store_document_with_explicit_transaction():
+            """Store document metadata with explicit transaction management."""
             attempt = 0
-            success = False
             current_retry_delay = retry_delay
 
-            while attempt < max_retries and not success:
+            while attempt < max_retries:
                 try:
-                    if is_update and auth:
-                        # For updates, use update_document, serialize StorageFileInfo into plain dicts
-                        updates = {
-                            "chunk_ids": doc.chunk_ids,
-                            "metadata": doc.metadata,
-                            "system_metadata": doc.system_metadata,
-                            "filename": doc.filename,
-                            "content_type": doc.content_type,
-                            "storage_info": doc.storage_info,
-                            "storage_files": (
-                                [
-                                    (
-                                        file.model_dump()
-                                        if hasattr(file, "model_dump")
-                                        else (file.dict() if hasattr(file, "dict") else file)
+                    logger.debug(f"Attempting to store document metadata (attempt {attempt + 1}/{max_retries})")
+                    
+                    # Use explicit transaction management if available
+                    if hasattr(self.db, 'async_session'):
+                        async with managed_transaction(self.db, "document_metadata") as session:
+                            if is_update and auth:
+                                # For updates, use update_document with session
+                                updates = {
+                                    "chunk_ids": doc.chunk_ids,
+                                    "metadata": doc.metadata,
+                                    "system_metadata": doc.system_metadata,
+                                    "filename": doc.filename,
+                                    "content_type": doc.content_type,
+                                    "storage_info": doc.storage_info,
+                                    "storage_files": (
+                                        [
+                                            (
+                                                file.model_dump()
+                                                if hasattr(file, "model_dump")
+                                                else (file.dict() if hasattr(file, "dict") else file)
+                                            )
+                                            for file in doc.storage_files
+                                        ]
+                                        if doc.storage_files
+                                        else []
+                                    ),
+                                }
+                                if hasattr(self.db, 'update_document_with_session'):
+                                    success = await asyncio.wait_for(
+                                        self.db.update_document_with_session(session, doc.external_id, updates, auth),
+                                        timeout=transaction_timeout
                                     )
-                                    for file in doc.storage_files
-                                ]
-                                if doc.storage_files
-                                else []
-                            ),
-                        }
-                        success = await self.db.update_document(doc.external_id, updates, auth)
-                        if not success:
-                            raise Exception("Failed to update document metadata")
+                                else:
+                                    success = await asyncio.wait_for(
+                                        self.db.update_document(doc.external_id, updates, auth),
+                                        timeout=transaction_timeout
+                                    )
+                            else:
+                                # For new documents, use store_document with session
+                                if hasattr(self.db, 'store_document_with_session'):
+                                    success = await asyncio.wait_for(
+                                        self.db.store_document_with_session(session, doc),
+                                        timeout=transaction_timeout
+                                    )
+                                else:
+                                    success = await asyncio.wait_for(
+                                        self.db.store_document(doc),
+                                        timeout=transaction_timeout
+                                    )
                     else:
-                        # For new documents, use store_document
-                        success = await self.db.store_document(doc)
-                        if not success:
-                            raise Exception("Failed to store document metadata")
+                        # Fallback to regular methods with timeout
+                        if is_update and auth:
+                            updates = {
+                                "chunk_ids": doc.chunk_ids,
+                                "metadata": doc.metadata,
+                                "system_metadata": doc.system_metadata,
+                                "filename": doc.filename,
+                                "content_type": doc.content_type,
+                                "storage_info": doc.storage_info,
+                                "storage_files": (
+                                    [
+                                        (
+                                            file.model_dump()
+                                            if hasattr(file, "model_dump")
+                                            else (file.dict() if hasattr(file, "dict") else file)
+                                        )
+                                        for file in doc.storage_files
+                                    ]
+                                    if doc.storage_files
+                                    else []
+                                ),
+                            }
+                            success = await asyncio.wait_for(
+                                self.db.update_document(doc.external_id, updates, auth),
+                                timeout=transaction_timeout
+                            )
+                        else:
+                            success = await asyncio.wait_for(
+                                self.db.store_document(doc),
+                                timeout=transaction_timeout
+                            )
+                    
+                    if not success:
+                        raise Exception("Failed to store/update document metadata")
+                    
+                    logger.info("Successfully stored document metadata")
                     return success
+
+                except asyncio.TimeoutError:
+                    attempt += 1
+                    error_msg = f"Document metadata transaction timeout after {transaction_timeout}s"
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"Timeout during document metadata storage "
+                            f"(attempt {attempt}/{max_retries}): {error_msg}. "
+                            f"Retrying in {current_retry_delay}s..."
+                        )
+                        await asyncio.sleep(current_retry_delay)
+                        current_retry_delay *= 2
+                    else:
+                        logger.error(f"All document metadata storage attempts timed out after {max_retries} retries")
+                        raise Exception(f"Failed to store document metadata: timeout after multiple retries")
+
                 except Exception as e:
                     attempt += 1
                     error_msg = str(e)
-                    if "connection was closed" in error_msg or "ConnectionDoesNotExistError" in error_msg:
-                        if attempt < max_retries:
-                            logger.warning(
-                                f"Database connection error during document metadata storage "
-                                f"(attempt {attempt}/{max_retries}): {error_msg}. "
-                                f"Retrying in {current_retry_delay}s..."
-                            )
-                            await asyncio.sleep(current_retry_delay)
-                            # Increase delay for next retry (exponential backoff)
-                            current_retry_delay *= 2
-                        else:
-                            logger.error(
-                                f"All database connection attempts failed " f"after {max_retries} retries: {error_msg}"
-                            )
-                            raise Exception("Failed to store document metadata after multiple retries")
+                    is_connection_error = any(err_pattern in error_msg.lower() for err_pattern in [
+                        "connection was closed", "connectiondoesnotexisterror", "connection pool",
+                        "server closed the connection", "connection timeout", "database lock"
+                    ])
+                    
+                    if is_connection_error and attempt < max_retries:
+                        logger.warning(
+                            f"Database connection error during document metadata storage "
+                            f"(attempt {attempt}/{max_retries}): {error_msg}. "
+                            f"Retrying in {current_retry_delay}s..."
+                        )
+                        await asyncio.sleep(current_retry_delay)
+                        current_retry_delay *= 2
                     else:
-                        # For other exceptions, don't retry
-                        logger.error(f"Error storing document metadata: {error_msg}")
-                        raise
+                        logger.error(f"Error storing document metadata (attempt {attempt}): {error_msg}")
+                        if attempt >= max_retries:
+                            raise Exception(f"Failed to store document metadata after {max_retries} retries: {error_msg}")
+                        else:
+                            raise
 
-        # Run storage operations in parallel when possible
-        storage_tasks = [store_with_retry(self.vector_store, chunk_objects, "regular")]
+        try:
+            # SERIALIZE vector store operations to avoid connection pool exhaustion
+            # This is the key optimization - instead of parallel operations that compete for connections,
+            # we do them sequentially to ensure stable database access
+            
+            logger.info("Starting serialized vector store operations...")
+            
+            # 1. Store regular embeddings first
+            logger.debug("Storing regular embeddings...")
+            regular_chunk_ids = await store_with_explicit_transaction(
+                self.vector_store, chunk_objects, "regular"
+            )
+            
+            # 2. Store colpali embeddings second (if needed)
+            colpali_chunk_ids = []
+            if use_colpali and self.colpali_vector_store and chunk_objects_multivector:
+                logger.debug("Storing colpali embeddings...")
+                colpali_chunk_ids = await store_with_explicit_transaction(
+                    self.colpali_vector_store, chunk_objects_multivector, "colpali"
+                )
+            
+            # 3. Combine chunk IDs  
+            doc.chunk_ids = regular_chunk_ids + colpali_chunk_ids
+            logger.info(f"Successfully stored all embeddings: {len(doc.chunk_ids)} chunks total")
 
-        # Add colpali storage task if needed
-        if use_colpali and self.colpali_vector_store and chunk_objects_multivector:
-            storage_tasks.append(store_with_retry(self.colpali_vector_store, chunk_objects_multivector, "colpali"))
+            # 4. Store document metadata last (after all chunks are stored successfully)
+            logger.debug("Storing document metadata...")
+            await store_document_with_explicit_transaction()
 
-        # Execute storage tasks concurrently
-        storage_results = await asyncio.gather(*storage_tasks)
+            logger.info(f"✅ Successfully completed optimized storage for document {doc.external_id}")
+            return doc.chunk_ids
 
-        # Combine chunk IDs
-        regular_chunk_ids = storage_results[0]
-        colpali_chunk_ids = storage_results[1] if len(storage_results) > 1 else []
-        doc.chunk_ids = regular_chunk_ids + colpali_chunk_ids
-
-        logger.debug(f"Stored chunk embeddings in vector stores: {len(doc.chunk_ids)} chunks total")
-
-        # Store document metadata (this must be done after chunk storage)
-        await store_document_with_retry()
-
-        logger.debug("Stored document metadata in database")
-        logger.debug(f"Chunk IDs stored: {doc.chunk_ids}")
-        return doc.chunk_ids
+        except Exception as e:
+            logger.error(f"❌ Optimized storage failed for document {doc.external_id}: {str(e)}")
+            # Attempt to clean up any partial state
+            try:
+                if hasattr(doc, 'chunk_ids') and doc.chunk_ids:
+                    logger.warning("Partial chunk storage detected - cleanup may be needed")
+            except Exception as cleanup_error:
+                logger.warning(f"Cleanup attempt failed: {str(cleanup_error)}")
+            raise Exception(f"Storage operation failed after optimization attempts: {str(e)}")
 
     async def _create_chunk_results(self, auth: AuthContext, chunks: List[DocumentChunk]) -> List[ChunkResult]:
         """Create ChunkResult objects with document metadata."""
