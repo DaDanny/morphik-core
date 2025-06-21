@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 import { setupLogging } from "@/lib/log";
 
 // Default API base URL
-const DEFAULT_API_BASE_URL = "http://10.128.0.9:8000";
+const DEFAULT_API_BASE_URL = "http://34.31.17.55:3000";
 
 // Disable excessive logging unless debug is enabled
 setupLogging();
