@@ -22,7 +22,7 @@ export default function YourApp() {
   return (
     <MorphikUI
       connectionUri="your-connection-uri"
-      apiBaseUrl="http://your-api-base-url"
+      apiBaseUrl="http://10.128.0.9:8000"  // Use internal IP for GCE Docker deployment
       isReadOnlyUri={false}
       onUriChange={uri => console.log("URI changed:", uri)}
     />
@@ -32,12 +32,34 @@ export default function YourApp() {
 
 ## Props
 
-| Prop            | Type                    | Default                   | Description                            |
-| --------------- | ----------------------- | ------------------------- | -------------------------------------- |
-| `connectionUri` | `string`                | `undefined`               | Connection URI for Morphik API         |
-| `apiBaseUrl`    | `string`                | `"http://localhost:8000"` | Base URL for API requests              |
-| `isReadOnlyUri` | `boolean`               | `false`                   | Controls whether the URI can be edited |
-| `onUriChange`   | `(uri: string) => void` | `undefined`               | Callback when URI is changed           |
+| Prop            | Type                    | Default                     | Description                            |
+| --------------- | ----------------------- | --------------------------- | -------------------------------------- |
+| `connectionUri` | `string`                | `undefined`                 | Connection URI for Morphik API         |
+| `apiBaseUrl`    | `string`                | `"http://10.128.0.9:8000"`  | Base URL for API requests (use internal IP for Docker containers) |
+| `isReadOnlyUri` | `boolean`               | `false`                     | Controls whether the URI can be edited |
+| `onUriChange`   | `(uri: string) => void` | `undefined`                 | Callback when URI is changed           |
+
+## API Configuration
+
+The UI needs to connect to a running Morphik server. Configure the `apiBaseUrl` based on your deployment:
+
+### Local Development
+```jsx
+apiBaseUrl="http://localhost:8000"
+```
+
+### GCE Docker Container Deployment
+```jsx
+apiBaseUrl="http://10.128.0.9:8000"  // Use the internal IP of your GCE instance
+```
+
+### Environment Variable Configuration
+You can also set the API base URL using environment variables:
+
+```bash
+# .env.local
+NEXT_PUBLIC_API_BASE_URL=http://10.128.0.9:8000
+```
 
 ## Prerequisites
 
