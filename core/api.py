@@ -156,6 +156,7 @@ else:
 @app.get("/ping")
 async def ping_health():
     """Simple health check endpoint that returns 200 OK."""
+    logger.info("Ping health check endpoint called")
     return {"status": "ok", "message": "Server is running"}
 
 
