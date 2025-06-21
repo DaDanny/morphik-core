@@ -133,7 +133,8 @@ async def complete_document_chat(
     try:
         # Get settings and model configuration
         settings = get_settings()
-        model_config = settings.REGISTERED_MODELS.get("gemini_flash", {})
+        # Use the existing Ollama model instead of requiring Gemini
+        model_config = settings.REGISTERED_MODELS.get("ollama_llama3", {})
 
         if not model_config:
             raise HTTPException(status_code=500, detail="Model configuration not found")
@@ -231,7 +232,7 @@ async def complete_document_chat(
 
                     # Prepare LiteLLM parameters
                     model_params = {
-                        "model": model_config.get("model_name", "gemini/gemini-2.5-flash-preview-05-20"),
+                        "model": model_config.get("model_name", "ollama_chat/llama3.1:8b"),
                         "messages": conversation_messages,
                         "tools": tools,
                         "tool_choice": "auto",
@@ -240,12 +241,14 @@ async def complete_document_chat(
                         "stream": False,  # Use non-streaming for tool calls
                         "num_retries": 3,
                     }
-                    if str(model_params["model"]).startswith("gemini"):
-                        model_params["api_key"] = settings.GEMINI_API_KEY
+                    
+                    # Add Ollama API base if available
+                    if "api_base" in model_config:
+                        model_params["api_base"] = model_config["api_base"]
 
                     # Add any additional model config parameters
                     for key, value in model_config.items():
-                        if key != "model_name":
+                        if key not in ["model_name", "api_base"]:
                             model_params[key] = value
 
                     logger.debug(f"Calling LiteLLM with tools, iteration {iteration}")

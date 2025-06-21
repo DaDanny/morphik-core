@@ -204,8 +204,16 @@ class PDFViewer:
         # return f"Invalid page number. Must be between 0 and {self.total_pages - 1}"
 
     def _summarize_page(self, page_number: int) -> str:
-        """Summarize a page using Gemini 2.5 Flash model."""
+        """Summarize a page using the configured document analysis model."""
         import litellm
+        from core.config import get_settings
+
+        # Get settings and model configuration
+        settings = get_settings()
+        model_config = settings.REGISTERED_MODELS.get("ollama_llama3", {})
+        
+        if not model_config:
+            return "Error: No document analysis model configured for page summarization"
 
         # Get the page image URL
         page_url = self._create_page_url(page_number)
@@ -221,10 +229,24 @@ class PDFViewer:
             }
         ]
 
-        # Call Gemini 2.5 Flash using litellm
-        response = litellm.completion(model="gemini/gemini-2.5-flash-preview-05-20", messages=messages, max_tokens=500)
-
-        return response.choices[0].message.content
+        try:
+            # Prepare model parameters
+            model_params = {
+                "model": model_config.get("model_name", "ollama_chat/llama3.1:8b"),
+                "messages": messages,
+                "max_tokens": 500,
+                "temperature": 0.3,
+            }
+            
+            # Add Ollama API base if available
+            if "api_base" in model_config:
+                model_params["api_base"] = model_config["api_base"]
+            
+            # Call the configured model using litellm
+            response = litellm.completion(**model_params)
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"Error generating summary: {str(e)}"
 
 
 # LiteLLM Tools Description for PDF Viewer
