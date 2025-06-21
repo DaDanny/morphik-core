@@ -15,7 +15,8 @@ import { cn } from "@/lib/utils";
 import { setupLogging } from "@/lib/log";
 
 // Default API base URL
-const DEFAULT_API_BASE_URL = "http://34.9.226.169:8000";
+const DEFAULT_API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://34.9.226.169:8000";
+console.log("DEFAULT_API_BASE_URL", DEFAULT_API_BASE_URL);
 
 // Disable excessive logging unless debug is enabled
 setupLogging();
