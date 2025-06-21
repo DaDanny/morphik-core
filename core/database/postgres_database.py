@@ -123,10 +123,29 @@ class ChatConversationModel(Base):
     __table_args__ = ()
 
 
+def _sanitize_text(text: str) -> str:
+    """Sanitize text to remove problematic Unicode characters that PostgreSQL can't handle."""
+    if not isinstance(text, str):
+        return text
+    
+    # Remove null characters and other problematic Unicode characters
+    # \u0000 - null character (causes PostgreSQL JSONB errors)
+    # \u0001-\u001F - other control characters 
+    # \uFFFE, \uFFFF - non-characters
+    import re
+    
+    # Remove null characters and control characters except for common ones (tab, newline, carriage return)
+    sanitized = re.sub(r'[\u0000\u0001-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]', '', text)
+    
+    return sanitized
+
+
 def _serialize_datetime(obj: Any) -> Any:
-    """Helper function to serialize datetime objects to ISO format strings."""
+    """Helper function to serialize datetime objects to ISO format strings and sanitize text."""
     if isinstance(obj, datetime):
         return obj.isoformat()
+    elif isinstance(obj, str):
+        return _sanitize_text(obj)
     elif isinstance(obj, dict):
         return {key: _serialize_datetime(value) for key, value in obj.items()}
     elif isinstance(obj, list):
