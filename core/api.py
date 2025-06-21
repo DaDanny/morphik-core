@@ -159,6 +159,62 @@ async def ping_health():
     return {"status": "ok", "message": "Server is running"}
 
 
+@app.get("/settings")
+async def get_current_settings(auth: AuthContext = Depends(verify_token)):
+    """
+    Get current Morphik configuration settings.
+    
+    This endpoint returns the current configuration settings that the service started with,
+    useful for debugging and verifying configuration changes.
+    
+    Args:
+        auth: Authentication context (requires admin permissions)
+        
+    Returns:
+        Dict containing current configuration settings
+    """
+    # Only allow admin users to view settings
+    if not auth.permissions or "admin" not in auth.permissions:
+        raise HTTPException(status_code=403, detail="Admin permissions required to view settings")
+    
+    try:
+        # Get current settings
+        current_settings = get_settings()
+        
+        # Convert to dict and remove sensitive information
+        settings_dict = current_settings.model_dump()
+        
+        # Remove sensitive keys
+        sensitive_keys = [
+            "JWT_SECRET_KEY",
+            "SESSION_SECRET_KEY", 
+            "POSTGRES_URI",
+            "UNSTRUCTURED_API_KEY",
+            "AWS_ACCESS_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "ASSEMBLYAI_API_KEY",
+            "GEMINI_API_KEY",
+            "MORPHIK_EMBEDDING_API_KEY",
+            "MORPHIK_GRAPH_API_KEY"
+        ]
+        
+        for key in sensitive_keys:
+            if key in settings_dict:
+                settings_dict[key] = "***REDACTED***" if settings_dict[key] else None
+        
+        return {
+            "settings": settings_dict,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "config_source": "morphik.toml"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error retrieving settings: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving settings: {str(e)}")
+
+
 # ---------------------------------------------------------------------------
 # Core singletons (database, vector store, storage, parser, models …)
 # ---------------------------------------------------------------------------
