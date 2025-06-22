@@ -534,6 +534,9 @@ async def process_ingestion_job(
             use_colpali and document_service.colpali_embedding_model and document_service.colpali_vector_store
         )
 
+        logger.info(f"   🎨 ColPali available: {using_colpali} turned off for testing")
+        using_colpali = False
+
         should_create_image_chunks = has_image_rules or using_colpali
         
         logger.info(f"   🔍 Image rules detected: {has_image_rules}")
@@ -739,7 +742,7 @@ async def process_ingestion_job(
         colpali_embed_start = time.time()
         chunk_objects_multivector = []
         
-        if False:
+        if using_colpali:
             logger.info(f"   📊 Multivector chunks to embed: {len(processed_chunks_multivector)}")
             logger.info("   🔄 Starting ColPali embedding generation...")
             
