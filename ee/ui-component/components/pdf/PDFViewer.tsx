@@ -14,7 +14,6 @@ import {
   ChevronLeft,
   ChevronRight,
   FileText,
-  Download,
   Maximize2,
   User,
   Cpu,
@@ -36,7 +35,8 @@ import { usePDFChatSessions } from "@/hooks/useChatSessions";
 import { usePDFSession } from "@/components/pdf/PDFAPIService";
 
 // Configure PDF.js worker - use CDN for reliability
-pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
@@ -83,6 +83,10 @@ interface ChatMessage {
   // For tool response messages
   tool_call_id?: string;
   name?: string;
+  // For tool messages with additional data
+  metadata?: Record<string, unknown>;
+  current_frame?: string;
+  args?: Record<string, unknown>;
 }
 
 interface AgentData {
@@ -108,6 +112,10 @@ interface ApiChatMessage {
   // For tool response messages
   tool_call_id?: string;
   name?: string;
+  // For tool messages with additional data
+  metadata?: Record<string, unknown>;
+  current_frame?: string;
+  args?: Record<string, unknown>;
 }
 
 interface PDFDocument {
@@ -150,6 +158,14 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
   const [chatInput, setChatInput] = useState("");
   const [isChatLoading, setIsChatLoading] = useState(false);
 
+  // Tool detail modal state
+  const [selectedToolMessage, setSelectedToolMessage] = useState<ChatMessage | null>(null);
+  const [isToolDetailOpen, setIsToolDetailOpen] = useState(false);
+
+  // Tool execution state tracking
+  const [executingTools, setExecutingTools] = useState<Map<string, ChatMessage>>(new Map());
+  console.log("executingTools", executingTools);
+
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<HTMLDivElement>(null);
 
@@ -168,9 +184,9 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
   // Memoize PDF options to prevent unnecessary reloads
   const pdfOptions = useMemo(
     () => ({
-      cMapUrl: `//unpkg.com/pdfjs-dist@${pdfjs.version}/cmaps/`,
+      cMapUrl: `https://unpkg.com/pdfjs-dist@${pdfjs.version}/cmaps/`,
       cMapPacked: true,
-      standardFontDataUrl: `//unpkg.com/pdfjs-dist@${pdfjs.version}/standard_fonts/`,
+      standardFontDataUrl: `https://unpkg.com/pdfjs-dist@${pdfjs.version}/standard_fonts/`,
     }),
     []
   );
@@ -222,6 +238,9 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
   const handleChatSubmit = useCallback(async () => {
     if (!chatInput.trim() || isChatLoading || !currentChatId) return;
 
+    // Automatically switch to API mode when chat is submitted
+    setPdfState(prev => ({ ...prev, controlMode: "api" }));
+
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: "user",
@@ -272,7 +291,6 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
 
       while (true) {
         const { done, value } = await reader.read();
-
         if (done) break;
 
         const chunk = decoder.decode(value);
@@ -283,63 +301,179 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
             try {
               const data = JSON.parse(line.slice(6));
 
-              if (data.content) {
-                // If we don't have a current assistant message, create one
-                if (!currentAssistantMessage) {
-                  currentAssistantMessage = {
-                    id: `assistant-${Date.now()}-${messageIdCounter++}`,
-                    role: "assistant",
-                    content: data.content,
-                    timestamp: new Date(),
-                  };
-                  assistantContent = data.content;
-                  setChatMessages(prev => [...prev, currentAssistantMessage!]);
-                } else {
-                  // Update the current assistant message
-                  assistantContent += data.content;
-                  setChatMessages(prev => {
-                    const messageIndex = prev.findIndex(msg => msg.id === currentAssistantMessage!.id);
-                    if (messageIndex !== -1) {
-                      const newMessages = [...prev];
-                      newMessages[messageIndex] = { ...newMessages[messageIndex], content: assistantContent };
-                      return newMessages;
+              // Handle different event types
+              switch (data.type) {
+                case "assistant":
+                  if (data.tool_calls && data.tool_calls.length > 0) {
+                    // Assistant message with tool calls - create message with tool calls info
+                    const assistantMessage: ChatMessage = {
+                      id: `assistant-${Date.now()}-${messageIdCounter++}`,
+                      role: "assistant",
+                      content:
+                        data.content || "I'll help you with that. Let me use some tools to analyze the document.",
+                      tool_calls: data.tool_calls,
+                      timestamp: new Date(),
+                    };
+
+                    setChatMessages(prev => [...prev, assistantMessage]);
+                    currentAssistantMessage = assistantMessage;
+                    assistantContent = data.content || "";
+                  } else if (data.content) {
+                    // Regular assistant content - either create new message or update existing
+                    if (!currentAssistantMessage) {
+                      // Create new assistant message
+                      const assistantMessage: ChatMessage = {
+                        id: `assistant-${Date.now()}-${messageIdCounter++}`,
+                        role: "assistant",
+                        content: data.content,
+                        timestamp: new Date(),
+                      };
+
+                      setChatMessages(prev => [...prev, assistantMessage]);
+                      currentAssistantMessage = assistantMessage;
+                      assistantContent = data.content;
+                    } else {
+                      // Update existing assistant message
+                      assistantContent += data.content;
+                      const messageId = currentAssistantMessage.id;
+                      setChatMessages(prev =>
+                        prev.map(msg => (msg.id === messageId ? { ...msg, content: assistantContent } : msg))
+                      );
                     }
-                    return prev;
-                  });
-                }
-              }
+                  }
+                  break;
 
-              if (data.tool_call && data.result) {
-                // If we have a current assistant message with content, finalize it
-                if (currentAssistantMessage && assistantContent) {
-                  currentAssistantMessage = null;
-                  assistantContent = "";
-                }
+                case "tool_start":
+                  // Tool execution started - create loading message
+                  if (data.name && data.id) {
+                    const toolLoadingMessage: ChatMessage = {
+                      id: `tool-loading-${data.id}`,
+                      role: "tool",
+                      content: "Executing...",
+                      name: data.name,
+                      timestamp: new Date(),
+                      metadata: { status: "executing" },
+                      current_frame: undefined,
+                      args: data.args || {},
+                    };
 
-                // Create and add tool message
-                const toolMessage: ChatMessage = {
-                  id: `tool-${Date.now()}-${messageIdCounter++}`,
-                  role: "tool",
-                  content: data.result,
-                  name: data.tool_call,
-                  timestamp: new Date(),
-                };
+                    // Add to executing tools map
+                    setExecutingTools(prev => new Map(prev.set(data.id, toolLoadingMessage)));
 
-                // Add tool message to chat
-                setChatMessages(prev => [...prev, toolMessage]);
+                    // Add to chat messages
+                    setChatMessages(prev => [...prev, toolLoadingMessage]);
+                  }
+                  break;
 
-                // Reset for potential next assistant message
-                currentAssistantMessage = null;
-                assistantContent = "";
-              }
+                case "tool_complete":
+                  // Tool execution completed - update the loading message
+                  if (data.name && data.id && data.content) {
+                    const completedToolMessage: ChatMessage = {
+                      id: `tool-${data.id}`,
+                      role: "tool",
+                      content: data.content,
+                      name: data.name,
+                      timestamp: new Date(),
+                      metadata: { ...data.metadata, status: "completed" },
+                      current_frame: data.current_frame,
+                      args: data.args || {},
+                    };
 
-              if (data.done) {
-                setIsChatLoading(false);
-                return;
-              }
+                    // Remove from executing tools
+                    setExecutingTools(prev => {
+                      const newMap = new Map(prev);
+                      newMap.delete(data.id);
+                      return newMap;
+                    });
 
-              if (data.error) {
-                throw new Error(data.error);
+                    // Update the chat message
+                    setChatMessages(prev =>
+                      prev.map(msg => (msg.id === `tool-loading-${data.id}` ? completedToolMessage : msg))
+                    );
+
+                    // Reset current assistant message so next assistant content creates new message
+                    currentAssistantMessage = null;
+                    assistantContent = "";
+                  }
+                  break;
+
+                case "tool":
+                  // Legacy tool execution result - create tool message with metadata
+                  if (data.name && data.content) {
+                    const toolMessage: ChatMessage = {
+                      id: `tool-${Date.now()}-${messageIdCounter++}`,
+                      role: "tool",
+                      content: data.content,
+                      name: data.name,
+                      timestamp: new Date(),
+                      metadata: data.metadata || {},
+                      current_frame: data.current_frame,
+                      args: data.args || {},
+                    };
+
+                    setChatMessages(prev => [...prev, toolMessage]);
+
+                    // Reset current assistant message so next assistant content creates new message
+                    currentAssistantMessage = null;
+                    assistantContent = "";
+                  }
+                  break;
+
+                case "done":
+                  // Streaming complete
+                  setIsChatLoading(false);
+                  return;
+
+                case "error":
+                  // Error occurred
+                  throw new Error(data.content || "Unknown error occurred");
+
+                default:
+                  // Legacy format support - handle old format for backward compatibility
+                  if (data.content && !data.type) {
+                    if (!currentAssistantMessage) {
+                      const assistantMessage: ChatMessage = {
+                        id: `assistant-${Date.now()}-${messageIdCounter++}`,
+                        role: "assistant",
+                        content: data.content,
+                        timestamp: new Date(),
+                      };
+
+                      setChatMessages(prev => [...prev, assistantMessage]);
+                      currentAssistantMessage = assistantMessage;
+                      assistantContent = data.content;
+                    } else {
+                      assistantContent += data.content;
+                      const messageId = currentAssistantMessage.id;
+                      setChatMessages(prev =>
+                        prev.map(msg => (msg.id === messageId ? { ...msg, content: assistantContent } : msg))
+                      );
+                    }
+                  } else if (data.tool_call && data.result) {
+                    // Legacy tool format
+                    const toolMessage: ChatMessage = {
+                      id: `tool-${Date.now()}-${messageIdCounter++}`,
+                      role: "tool",
+                      content: data.result,
+                      name: data.tool_call,
+                      timestamp: new Date(),
+                      metadata: {},
+                      current_frame: undefined,
+                      args: {},
+                    };
+
+                    setChatMessages(prev => [...prev, toolMessage]);
+                    currentAssistantMessage = null;
+                    assistantContent = "";
+                  } else if (data.done) {
+                    // Legacy done format
+                    setIsChatLoading(false);
+                    return;
+                  } else if (data.error) {
+                    // Legacy error format
+                    throw new Error(data.error);
+                  }
+                  break;
               }
             } catch (parseError) {
               // Ignore parsing errors for incomplete JSON
@@ -402,6 +536,9 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
               tool_calls: msg.tool_calls,
               tool_call_id: msg.tool_call_id,
               name: msg.name,
+              metadata: msg.metadata,
+              current_frame: msg.current_frame,
+              args: msg.args,
             }));
             setChatMessages(formattedMessages);
           } else {
@@ -432,14 +569,22 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
   }, [currentChatId, loadChatMessages]);
 
   // Handle PDF load success
-  const onDocumentLoadSuccess = useCallback(({ numPages }: { numPages: number }) => {
-    setPdfState(prev => ({
-      ...prev,
-      totalPages: numPages,
-      currentPage: 1,
-    }));
-    setIsLoading(false);
-  }, []);
+  const onDocumentLoadSuccess = useCallback(
+    ({ numPages }: { numPages: number }) => {
+      console.log("PDF document loaded successfully with", numPages, "pages");
+      console.log("Current PDF state:", pdfState);
+      console.log("PDF document loaded successfully with", numPages, "pages");
+      console.log("Current PDF state:", pdfState);
+      setPdfState(prev => ({
+        ...prev,
+        totalPages: numPages,
+        currentPage: 1,
+      }));
+      setIsLoading(false);
+      console.log("PDF loading state set to false");
+    },
+    [pdfState]
+  );
 
   // Handle PDF load error
   const onDocumentLoadError = useCallback(
@@ -447,9 +592,21 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
       console.error("Error loading PDF:", error);
       console.error("PDF.js worker src:", pdfjs.GlobalWorkerOptions.workerSrc);
       console.error("PDF file URL:", pdfState.pdfDataUrl);
+      console.error("PDF file object:", pdfState.file);
+      console.error("PDF state:", pdfState);
+
+      // Additional debugging for common PDF.js issues
+      if (error.message.includes("Invalid PDF")) {
+        console.error("PDF appears to be corrupted or invalid");
+      } else if (error.message.includes("worker")) {
+        console.error("PDF.js worker issue - check network connectivity");
+      } else if (error.message.includes("fetch")) {
+        console.error("Network issue loading PDF - check CORS and URL accessibility");
+      }
+
       setIsLoading(false);
     },
-    [pdfState.pdfDataUrl]
+    [pdfState]
   );
 
   // PDF Controls
@@ -770,6 +927,12 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
       // Reset chat state for new PDF
       setChatMessages([]);
 
+      // Set a timeout to detect if loading takes too long
+      const loadingTimeout = setTimeout(() => {
+        console.warn("PDF loading is taking longer than expected (30 seconds)");
+        console.warn("This might indicate a network issue or corrupted PDF");
+      }, 30000);
+
       try {
         // First, get the download URL for this document
         const downloadUrlEndpoint = `${apiBaseUrl}/documents/${document.id}/download_url`;
@@ -816,11 +979,39 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
 
         const blob = await response.blob();
         console.log("Document downloaded successfully, blob size:", blob.size);
+        console.log("Blob type:", blob.type);
+
+        // Validate that we have a valid PDF blob
+        if (blob.size === 0) {
+          throw new Error("Downloaded file is empty");
+        }
+
+        if (!blob.type.includes("pdf") && !blob.type.includes("application/octet-stream")) {
+          console.warn("Blob type is not PDF:", blob.type, "- proceeding anyway");
+        }
+        console.log("Blob type:", blob.type);
+
+        // Validate that we have a valid PDF blob
+        if (blob.size === 0) {
+          throw new Error("Downloaded file is empty");
+        }
+
+        if (!blob.type.includes("pdf") && !blob.type.includes("application/octet-stream")) {
+          console.warn("Blob type is not PDF:", blob.type, "- proceeding anyway");
+        }
 
         const file = new File([blob], document.filename, { type: "application/pdf" });
 
         // Create object URL for the PDF
-        const pdfDataUrl = URL.createObjectURL(blob);
+        let pdfDataUrl: string;
+        try {
+          pdfDataUrl = URL.createObjectURL(blob);
+          console.log("Created PDF data URL:", pdfDataUrl);
+          console.log("PDF data URL length:", pdfDataUrl.length);
+        } catch (urlError) {
+          console.error("Failed to create object URL:", urlError);
+          throw new Error("Failed to create PDF data URL");
+        }
 
         setPdfState(prev => ({
           ...prev,
@@ -833,19 +1024,27 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
           documentName: document.filename,
           documentId: document.id,
         }));
+
+        // Set loading to false after successfully setting up the PDF state
+        // Note: onDocumentLoadSuccess will also call setIsLoading(false) when PDF.js finishes loading
+        setIsLoading(false);
+        clearTimeout(loadingTimeout);
+
+        // Set loading to false after successfully setting up the PDF state
+        // Note: onDocumentLoadSuccess will also call setIsLoading(false) when PDF.js finishes loading
+        setIsLoading(false);
+        clearTimeout(loadingTimeout);
       } catch (error) {
         console.error("Error loading selected document:", error);
         setIsLoading(false);
+        clearTimeout(loadingTimeout);
+        clearTimeout(loadingTimeout);
       }
     },
     [apiBaseUrl, authToken]
   );
 
-  // Open document selector and fetch documents
-  const openDocumentSelector = useCallback(() => {
-    setIsDocumentSelectorOpen(true);
-    fetchAvailableDocuments();
-  }, [fetchAvailableDocuments]);
+  // Removed openDocumentSelector function since Browse Documents button was removed
 
   // Load initial document if provided
   useEffect(() => {
@@ -873,6 +1072,66 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
       fetchAvailableDocuments();
     }
   }, [fetchAvailableDocuments, pdfState.file]);
+
+  // Debug PDF state changes
+  useEffect(() => {
+    console.log("PDF state changed:", pdfState);
+    if (pdfState.pdfDataUrl) {
+      console.log("PDF data URL is available:", pdfState.pdfDataUrl);
+    }
+  }, [pdfState]);
+
+  // Test PDF.js worker accessibility
+  useEffect(() => {
+    const testWorker = async () => {
+      try {
+        console.log("Testing PDF.js worker accessibility...");
+        console.log("Worker URL:", pdfjs.GlobalWorkerOptions.workerSrc);
+
+        // Test if the worker URL is accessible
+        const response = await fetch(pdfjs.GlobalWorkerOptions.workerSrc);
+        if (response.ok) {
+          console.log("PDF.js worker is accessible");
+        } else {
+          console.error("PDF.js worker is not accessible:", response.status, response.statusText);
+        }
+      } catch (error) {
+        console.error("Error testing PDF.js worker:", error);
+      }
+    };
+
+    testWorker();
+  }, []);
+
+  // Debug PDF state changes
+  useEffect(() => {
+    console.log("PDF state changed:", pdfState);
+    if (pdfState.pdfDataUrl) {
+      console.log("PDF data URL is available:", pdfState.pdfDataUrl);
+    }
+  }, [pdfState]);
+
+  // Test PDF.js worker accessibility
+  useEffect(() => {
+    const testWorker = async () => {
+      try {
+        console.log("Testing PDF.js worker accessibility...");
+        console.log("Worker URL:", pdfjs.GlobalWorkerOptions.workerSrc);
+
+        // Test if the worker URL is accessible
+        const response = await fetch(pdfjs.GlobalWorkerOptions.workerSrc);
+        if (response.ok) {
+          console.log("PDF.js worker is accessible");
+        } else {
+          console.error("PDF.js worker is not accessible:", response.status, response.statusText);
+        }
+      } catch (error) {
+        console.error("Error testing PDF.js worker:", error);
+      }
+    };
+
+    testWorker();
+  }, []);
 
   if (!pdfState.file) {
     return (
@@ -1114,19 +1373,84 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
             </div>
           </div>
         )}
+
+        {/* Tool Detail Modal */}
+        <Dialog open={isToolDetailOpen} onOpenChange={setIsToolDetailOpen}>
+          <DialogContent className="max-h-[80vh] max-w-4xl overflow-hidden">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <span className="text-green-600">🔧</span>
+                Tool: {selectedToolMessage?.name}
+              </DialogTitle>
+              <DialogDescription>Tool execution details and results</DialogDescription>
+            </DialogHeader>
+
+            {selectedToolMessage && (
+              <div className="space-y-4 overflow-y-auto">
+                {/* Tool Arguments */}
+                {selectedToolMessage.args && Object.keys(selectedToolMessage.args).length > 0 && (
+                  <div>
+                    <h4 className="mb-2 font-medium">Arguments:</h4>
+                    <div className="rounded-lg bg-muted p-3 text-sm">
+                      <pre className="whitespace-pre-wrap">{JSON.stringify(selectedToolMessage.args, null, 2)}</pre>
+                    </div>
+                  </div>
+                )}
+
+                {/* Tool Result */}
+                <div>
+                  <h4 className="mb-2 font-medium">Result:</h4>
+                  <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm dark:border-green-800 dark:bg-green-950">
+                    {selectedToolMessage.content}
+                  </div>
+                </div>
+
+                {/* Metadata */}
+                {selectedToolMessage.metadata && Object.keys(selectedToolMessage.metadata).length > 0 && (
+                  <div>
+                    <h4 className="mb-2 font-medium">Metadata:</h4>
+                    <div className="rounded-lg bg-muted p-3 text-sm">
+                      <pre className="whitespace-pre-wrap">{JSON.stringify(selectedToolMessage.metadata, null, 2)}</pre>
+                    </div>
+                  </div>
+                )}
+
+                {/* Current Frame Image */}
+                {selectedToolMessage.current_frame && (
+                  <div>
+                    <h4 className="mb-2 font-medium">Visual Result:</h4>
+                    <div className="overflow-hidden rounded-lg border">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={selectedToolMessage.current_frame}
+                        alt="Tool result visualization"
+                        className="h-auto max-h-96 w-full object-contain"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Timestamp */}
+                <div className="text-xs text-muted-foreground">
+                  Executed at: {selectedToolMessage.timestamp.toLocaleString()}
+                </div>
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full bg-white dark:bg-slate-900">
+    <div className="flex h-full bg-white dark:bg-black">
       {/* Main PDF Area */}
       <div
         className="flex flex-1 flex-col transition-all duration-300"
         style={{ marginRight: isChatOpen ? `${chatWidth}px` : "0px" }}
       >
         {/* Clean Header */}
-        <div className="border-b border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
+        <div className="border-b border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-black">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <FileText className="h-5 w-5 text-slate-600 dark:text-slate-400" />
@@ -1136,14 +1460,6 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
             </div>
 
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={openDocumentSelector}>
-                <FolderOpen className="mr-2 h-4 w-4" />
-                Browse Documents
-              </Button>
-              <Button variant="outline" size="sm">
-                <Download className="mr-2 h-4 w-4" />
-                Download
-              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -1169,14 +1485,14 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
               }}
             >
               {pdfState.pdfDataUrl && (
-                <div className="border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-800">
+                <div className="border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-zinc-900">
                   <Document
                     file={pdfState.pdfDataUrl}
                     onLoadSuccess={onDocumentLoadSuccess}
                     onLoadError={onDocumentLoadError}
                     options={pdfOptions}
                     loading={
-                      <div className="flex h-[800px] w-[600px] items-center justify-center bg-white p-8 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                      <div className="flex h-[800px] w-[600px] items-center justify-center bg-white p-8 text-slate-500 dark:bg-zinc-900 dark:text-slate-400">
                         <div className="text-center">
                           <FileText className="mx-auto mb-4 h-16 w-16 animate-pulse" />
                           <p>Loading PDF...</p>
@@ -1184,7 +1500,7 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
                       </div>
                     }
                     error={
-                      <div className="flex h-[800px] w-[600px] items-center justify-center bg-white p-8 text-red-500 dark:bg-slate-800 dark:text-red-400">
+                      <div className="flex h-[800px] w-[600px] items-center justify-center bg-white p-8 text-red-500 dark:bg-zinc-900 dark:text-red-400">
                         <div className="text-center">
                           <FileText className="mx-auto mb-4 h-16 w-16" />
                           <p>Error loading PDF</p>
@@ -1196,12 +1512,12 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
                     <Page
                       pageNumber={pdfState.currentPage}
                       loading={
-                        <div className="flex h-[800px] w-[600px] items-center justify-center bg-slate-100 dark:bg-slate-700">
+                        <div className="flex h-[800px] w-[600px] items-center justify-center bg-slate-100 dark:bg-zinc-800">
                           <div className="text-slate-500 dark:text-slate-400">Loading page...</div>
                         </div>
                       }
                       error={
-                        <div className="flex h-[800px] w-[600px] items-center justify-center bg-slate-100 dark:bg-slate-700">
+                        <div className="flex h-[800px] w-[600px] items-center justify-center bg-slate-100 dark:bg-zinc-800">
                           <div className="text-red-500 dark:text-red-400">Error loading page</div>
                         </div>
                       }
@@ -1215,9 +1531,9 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
             </div>
           </ScrollArea>
 
-          {/* Bottom Floating Control Bar */}
-          <div className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 transform">
-            <div className="flex items-center gap-4 border border-slate-200 bg-white px-4 py-2 shadow-lg dark:border-slate-700 dark:bg-slate-900">
+          {/* Bottom Floating Control Bar - Fixed to viewport center */}
+          <div className="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex justify-center">
+            <div className="pointer-events-auto flex items-center gap-4 rounded-lg border border-slate-200 bg-white px-4 py-2 shadow-lg dark:border-slate-700 dark:bg-black">
               {/* Control Mode Toggle */}
               <div
                 onClick={toggleControlMode}
@@ -1225,7 +1541,7 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
                   "flex cursor-pointer items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-colors",
                   pdfState.controlMode === "manual"
                     ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
-                    : "bg-blue-600 text-white"
+                    : "bg-zinc-700 text-white dark:bg-zinc-800"
                 )}
               >
                 {pdfState.controlMode === "manual" ? <User className="h-4 w-4" /> : <Cpu className="h-4 w-4" />}
@@ -1367,39 +1683,63 @@ export function PDFViewer({ apiBaseUrl, authToken, initialDocumentId }: PDFViewe
                           </div>
                         ) : message.role === "system" ? (
                           <div className="w-full">
-                            <div className="w-full rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-200">
+                            <div className="w-full rounded-lg border border-slate-200 bg-slate-100 p-3 text-sm text-slate-700 dark:border-slate-700 dark:bg-zinc-900 dark:text-slate-300">
                               {message.content}
                             </div>
                           </div>
                         ) : message.role === "tool" ? (
                           <div className="w-full">
-                            <div className="w-full rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200">
-                              <div className="flex items-start gap-2">
-                                <span className="text-green-600 dark:text-green-400">🔧</span>
-                                <div className="flex-1">
-                                  <span className="font-medium">{message.name}:</span> {message.content}
+                            <div
+                              className={`w-full rounded-lg border p-2 text-xs transition-colors ${
+                                message.metadata?.status === "executing" || message.content === "Executing..."
+                                  ? "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+                                  : "cursor-pointer border-green-200 bg-green-50 text-green-800 hover:bg-green-100 dark:border-green-800 dark:bg-green-950 dark:text-green-200 dark:hover:bg-green-900"
+                              }`}
+                              onClick={() => {
+                                if (message.metadata?.status !== "executing" && message.content !== "Executing...") {
+                                  setSelectedToolMessage(message);
+                                  setIsToolDetailOpen(true);
+                                }
+                              }}
+                              title={
+                                message.metadata?.status === "executing" || message.content === "Executing..."
+                                  ? "Tool is executing..."
+                                  : "Click to view tool details"
+                              }
+                            >
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={
+                                    message.metadata?.status === "executing" || message.content === "Executing..."
+                                      ? "text-amber-600 dark:text-amber-400"
+                                      : "text-green-600 dark:text-green-400"
+                                  }
+                                >
+                                  🔧
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <span className="font-medium">{message.name}</span>
+                                  {message.metadata?.status === "executing" || message.content === "Executing..." ? (
+                                    <div className="ml-2 inline-block">
+                                      <div className="relative overflow-hidden">
+                                        <span className="text-amber-600 dark:text-amber-400">⚡ Executing</span>
+                                        <div className="absolute inset-0 -skew-x-12 animate-shimmer bg-gradient-to-r from-transparent via-white/30 to-transparent"></div>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <span className="ml-1 text-green-600 dark:text-green-400">✓</span>
+                                  )}
                                 </div>
+                                {message.current_frame &&
+                                  message.metadata?.status !== "executing" &&
+                                  message.content !== "Executing..." && (
+                                    <span className="text-green-600 dark:text-green-400">🖼️</span>
+                                  )}
                               </div>
                             </div>
                           </div>
                         ) : (
                           <div className="w-full text-sm">
-                            {/* Show tool calls if present */}
-                            {message.tool_calls && message.tool_calls.length > 0 && (
-                              <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
-                                <div className="flex items-start gap-2">
-                                  <span className="text-amber-600 dark:text-amber-400">⚡</span>
-                                  <div className="flex-1">
-                                    <span className="font-medium">Using tools:</span>
-                                    {message.tool_calls.map(tc => (
-                                      <div key={tc.id} className="mt-1">
-                                        • {tc.function.name}
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              </div>
-                            )}
                             {/* Show assistant content if present */}
                             {message.content && (
                               <div className="prose prose-sm dark:prose-invert max-w-none text-sm">

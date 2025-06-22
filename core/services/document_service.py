@@ -608,6 +608,7 @@ class DocumentService:
         chat_history: Optional[List[ChatMessage]] = None,
         perf_tracker: Optional[Any] = None,  # Performance tracker from API layer
         stream_response: Optional[bool] = False,
+        llm_config: Optional[Dict[str, Any]] = None,
     ) -> Union[CompletionResponse, tuple[AsyncGenerator[str, None], List[ChunkSource]]]:
         """Generate completion using relevant chunks as context.
 
@@ -739,6 +740,7 @@ class DocumentService:
             schema=schema,
             chat_history=chat_history,
             stream_response=stream_response,
+            llm_config=llm_config,
         )
 
         response = await self.completion_model.complete(request)
