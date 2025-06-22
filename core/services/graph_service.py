@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 from pydantic import BaseModel
@@ -926,7 +926,8 @@ class GraphService:
         prompt_overrides: Optional[QueryPromptOverrides] = None,
         folder_name: Optional[Union[str, List[str]]] = None,
         end_user_id: Optional[str] = None,
-    ) -> CompletionResponse:
+        stream_response: Optional[bool] = False,
+    ) -> Union[CompletionResponse, tuple[AsyncGenerator[str, None], List[ChunkSource]]]:
         """Generate completion using knowledge graph-enhanced retrieval.
 
         This method enhances retrieval by:
@@ -984,6 +985,7 @@ class GraphService:
                 graph_name=None,
                 folder_name=folder_name,
                 end_user_id=end_user_id,
+                stream_response=stream_response,
             )
 
         # Parallel approach
@@ -1084,6 +1086,7 @@ class GraphService:
             prompt_overrides,
             folder_name=folder_name,
             end_user_id=end_user_id,
+            stream_response=stream_response,
         )
 
         return completion_response
@@ -1385,7 +1388,8 @@ class GraphService:
         prompt_overrides: Optional[QueryPromptOverrides] = None,
         folder_name: Optional[Union[str, List[str]]] = None,
         end_user_id: Optional[str] = None,
-    ) -> CompletionResponse:
+        stream_response: Optional[bool] = False,
+    ) -> Union[CompletionResponse, tuple[AsyncGenerator[str, None], List[ChunkSource]]]:
         """Generate completion using the retrieved chunks and optional path information."""
         if not chunks:
             chunks = []  # Ensure chunks is a list even if empty
@@ -1425,13 +1429,14 @@ class GraphService:
             prompt_template=custom_prompt_template,
             folder_name=folder_name,
             end_user_id=end_user_id,
+            stream_response=stream_response,
         )
 
         # Get completion from model
         response = await document_service.completion_model.complete(request)
 
-        # Add sources information
-        response.sources = [
+        # Prepare sources information
+        sources = [
             ChunkSource(
                 document_id=chunk.document_id,
                 chunk_number=chunk.chunk_number,
@@ -1440,28 +1445,36 @@ class GraphService:
             for chunk in chunks
         ]
 
-        # Include graph metadata if paths were requested
-        if include_paths:
-            # Initialize metadata if it doesn't exist
-            if not hasattr(response, "metadata") or response.metadata is None:
-                response.metadata = {}
+        # Handle streaming vs non-streaming responses
+        if stream_response:
+            # For streaming responses, return the async generator and sources separately
+            return response, sources
+        else:
+            # Add sources information for non-streaming
+            response.sources = sources
 
-            # Extract unique entities from paths (items that don't start with "(")
-            unique_entities = set()
-            if paths:
-                for path in paths[:5]:
-                    for item in path:
-                        if not item.startswith("("):
-                            unique_entities.add(item)
+            # Include graph metadata if paths were requested
+            if include_paths:
+                # Initialize metadata if it doesn't exist
+                if not hasattr(response, "metadata") or response.metadata is None:
+                    response.metadata = {}
 
-            # Add graph-specific metadata
-            response.metadata["graph"] = {
-                "name": graph_name,
-                "relevant_entities": list(unique_entities),
-                "paths": [" -> ".join(path) for path in paths[:5]] if paths else [],
-            }
+                # Extract unique entities from paths (items that don't start with "(")
+                unique_entities = set()
+                if paths:
+                    for path in paths[:5]:
+                        for item in path:
+                            if not item.startswith("("):
+                                unique_entities.add(item)
 
-        return response
+                # Add graph-specific metadata
+                response.metadata["graph"] = {
+                    "name": graph_name,
+                    "relevant_entities": list(unique_entities),
+                    "paths": [" -> ".join(path) for path in paths[:5]] if paths else [],
+                }
+
+            return response
 
     async def get_graph_visualization_data(
         self,
