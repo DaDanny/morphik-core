@@ -1,4 +1,5 @@
 from typing import List, Optional, Union
+import os
 
 from FlagEmbedding import FlagAutoReranker
 
@@ -18,6 +19,15 @@ class FlagReranker(BaseReranker):
         device: Optional[str] = None,
     ):
         """Initialize flag reranker"""
+        # Force CPU usage and disable MPS detection if device is CPU
+        if device == "cpu":
+            # Disable MPS to prevent PyTorch from trying to use Mac GPU in Docker
+            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+            # Force CPU usage
+            import torch
+            torch.backends.mps.is_available = lambda: False
+        
         devices = [device] if device else None
         self.reranker = FlagAutoReranker.from_finetuned(
             model_name_or_path=model_name,
