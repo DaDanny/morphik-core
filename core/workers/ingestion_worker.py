@@ -152,6 +152,18 @@ async def process_ingestion_job(
     folder_name: Optional[str] = None,
     end_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Process ingestion job with text sanitization to handle PostgreSQL compatibility."""
+    
+    def sanitize_text_for_db(text: str) -> str:
+        """Remove null bytes and other characters that PostgreSQL can't handle."""
+        if not text:
+            return text
+        # Remove null bytes and other control characters except newlines and tabs
+        sanitized = text.replace('\u0000', '')  # Remove null bytes
+        # Optionally remove other problematic control characters (but keep \n, \t, \r)
+        import re
+        sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', sanitized)
+        return sanitized
     """
     Background worker task that processes file ingestion jobs.
 
@@ -333,6 +345,10 @@ async def process_ingestion_job(
             )
             raise ValueError(f"Document {document_id} not found in database after multiple retries")
 
+        # Sanitize the extracted text
+        sanitized_text = sanitize_text_for_db(text)
+        logger.debug(f"Sanitized text: removed {len(text) - len(sanitized_text)} problematic characters")
+
         # Prepare updates for the document
         # Merge new metadata with existing metadata to preserve external_id
         merged_metadata = {**doc.metadata, **metadata}
@@ -342,7 +358,7 @@ async def process_ingestion_job(
         updates = {
             "metadata": merged_metadata,
             "additional_metadata": additional_metadata,
-            "system_metadata": {**doc.system_metadata, "content": text},
+            "system_metadata": {**doc.system_metadata, "content": sanitized_text},
         }
 
         # Add folder_name and end_user_id to system_metadata if provided
@@ -502,8 +518,11 @@ async def process_ingestion_job(
             if processed_chunks:
                 logger.info("Updating document content with processed chunks...")
                 stitched_content = "\n".join(chunk_contents)
-                doc.system_metadata["content"] = stitched_content
-                logger.info(f"Updated document content with stitched chunks (length: {len(stitched_content)})")
+                # Sanitize the stitched content before storing
+                sanitized_stitched_content = sanitize_text_for_db(stitched_content)
+                logger.debug(f"Sanitized stitched content: removed {len(stitched_content) - len(sanitized_stitched_content)} problematic characters")
+                doc.system_metadata["content"] = sanitized_stitched_content
+                logger.info(f"Updated document content with stitched chunks (length: {len(sanitized_stitched_content)})")
         else:
             processed_chunks = parsed_chunks  # No rules, use original chunks
             processed_chunks_multivector = chunks_multivector  # No rules, use original multivector chunks

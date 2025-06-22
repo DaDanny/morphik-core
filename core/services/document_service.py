@@ -853,8 +853,20 @@ class DocumentService:
             logger.info(f"Document metadata after post-parsing rules: {metadata}")
             logger.info(f"Content length after post-parsing rules: {len(content)}")
 
-        # Store full content before chunking
-        doc.system_metadata["content"] = content
+        # Sanitize and store full content before chunking
+        def sanitize_text_for_db(text: str) -> str:
+            """Remove null bytes and other characters that PostgreSQL can't handle."""
+            if not text:
+                return text
+            # Remove null bytes and other control characters except newlines and tabs
+            sanitized = text.replace('\u0000', '')  # Remove null bytes
+            # Optionally remove other problematic control characters (but keep \n, \t, \r)
+            import re
+            sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', sanitized)
+            return sanitized
+        
+        sanitized_content = sanitize_text_for_db(content)
+        doc.system_metadata["content"] = sanitized_content
 
         # Split text into chunks
         parsed_chunks = await self.parser.split_text(content)
@@ -884,8 +896,9 @@ class DocumentService:
             if processed_chunks:
                 logger.info("Updating document content with processed chunks...")
                 stitched_content = "\n".join(chunk_contents)
-                doc.system_metadata["content"] = stitched_content
-                logger.info(f"Updated document content with stitched chunks (length: {len(stitched_content)})")
+                sanitized_stitched_content = sanitize_text_for_db(stitched_content)
+                doc.system_metadata["content"] = sanitized_stitched_content
+                logger.info(f"Updated document content with stitched chunks (length: {len(sanitized_stitched_content)})")
         else:
             processed_chunks = parsed_chunks  # No rules, use original chunks
 
@@ -1939,9 +1952,10 @@ class DocumentService:
                     f"new length={len(updated_content)}"
                 )
 
-            # Always update the content in system_metadata
-            doc.system_metadata["content"] = updated_content
-            logger.info(f"Updated system_metadata['content'] with content of length {len(updated_content)}")
+            # Always update the content in system_metadata with sanitization
+            sanitized_updated_content = sanitize_text_for_db(updated_content)
+            doc.system_metadata["content"] = sanitized_updated_content
+            logger.info(f"Updated system_metadata['content'] with content of length {len(sanitized_updated_content)}")
         else:
             updated_content = current_content
             logger.info(f"No content update - keeping current content of length {len(current_content)}")
@@ -1966,8 +1980,9 @@ class DocumentService:
             # Check if content actually changed
             if stitched_content != updated_content:
                 logger.info("Updating document content with stitched content from processed chunks...")
-                doc.system_metadata["content"] = stitched_content
-                logger.info(f"Updated document content with stitched chunks (length: {len(stitched_content)})")
+                sanitized_stitched_content = sanitize_text_for_db(stitched_content)
+                doc.system_metadata["content"] = sanitized_stitched_content
+                logger.info(f"Updated document content with stitched chunks (length: {len(sanitized_stitched_content)})")
 
         # Merge any aggregated metadata from chunk rules
         if hasattr(self, "_last_aggregated_metadata") and self._last_aggregated_metadata:
