@@ -180,10 +180,22 @@ async def process_ingestion_job(
         # Start performance timer
         job_start_time = time.time()
         phase_times = {}
+        
         # 1. Log the start of the job
-        logger.info(f"Starting ingestion job for file: {original_filename}")
+        logger.info("="*80)
+        logger.info(f"🚀 STARTING INGESTION JOB")
+        logger.info(f"📄 File: {original_filename}")
+        logger.info(f"📦 Document ID: {document_id}")
+        logger.info(f"🔗 Bucket: {bucket}")
+        logger.info(f"🔑 File Key: {file_key}")
+        logger.info(f"📋 Content Type: {content_type}")
+        logger.info(f"🎯 Use ColPali: {use_colpali}")
+        logger.info(f"📁 Folder: {folder_name}")
+        logger.info(f"👤 End User ID: {end_user_id}")
+        logger.info("="*80)
 
         # 2. Deserialize metadata and auth
+        logger.info("🔧 PHASE 1: Deserializing metadata and auth context...")
         deserialize_start = time.time()
         metadata = json.loads(metadata_json) if metadata_json else {}
         auth = AuthContext(
@@ -193,29 +205,49 @@ async def process_ingestion_job(
             permissions=set(auth_dict.get("permissions", ["read"])),
             user_id=auth_dict.get("user_id", auth_dict.get("entity_id", "")),
         )
-        phase_times["deserialize_auth"] = time.time() - deserialize_start
+        deserialize_time = time.time() - deserialize_start
+        phase_times["deserialize_auth"] = deserialize_time
+        logger.info(f"✅ PHASE 1 COMPLETE: Auth deserialization took {deserialize_time:.3f}s")
+        logger.info(f"   📊 Metadata keys: {list(metadata.keys()) if metadata else 'None'}")
+        logger.info(f"   🔐 Auth - Entity: {auth.entity_type}, App ID: {auth.app_id}, User: {auth.user_id}")
 
         # ------------------------------------------------------------------
         # Per-app routing for database and vector store
         # ------------------------------------------------------------------
+        logger.info("🗃️ PHASE 2: Initializing database and vector store...")
+        db_init_start = time.time()
 
         # Resolve a dedicated database/vector-store using the JWT *app_id*.
         # When app_id is None we fall back to the control-plane resources.
-
+        logger.info(f"   🔍 Getting database for app_id: {auth.app_id}")
         database = await get_database_for_app(auth.app_id)
+        
+        logger.info("   🔄 Initializing database connection...")
         await database.initialize()
+        logger.info("   ✅ Database initialized successfully")
 
+        logger.info(f"   🔍 Getting vector store for app_id: {auth.app_id}")
         vector_store = await get_vector_store_for_app(auth.app_id)
         if vector_store and hasattr(vector_store, "initialize"):
             # PGVectorStore.initialize is *async*
             try:
+                logger.info("   🔄 Initializing vector store...")
                 await vector_store.initialize()
+                logger.info("   ✅ Vector store initialized successfully")
             except Exception as init_err:
-                logger.warning(f"Vector store initialization failed for app {auth.app_id}: {init_err}")
+                logger.warning(f"   ⚠️ Vector store initialization failed for app {auth.app_id}: {init_err}")
+        
+        db_init_time = time.time() - db_init_start
+        phase_times["database_vector_store_init"] = db_init_time
+        logger.info(f"✅ PHASE 2 COMPLETE: Database and vector store initialization took {db_init_time:.3f}s")
 
         # Initialise a per-app MultiVectorStore for ColPali when needed
+        logger.info("🎨 PHASE 3: Setting up ColPali and DocumentService...")
+        colpali_setup_start = time.time()
+        
         colpali_vector_store = None
         if use_colpali:
+            logger.info("   🔄 Initializing ColPali MultiVectorStore...")
             try:
                 # Use render_as_string(hide_password=False) so the URI keeps the
                 # password – str(engine.url) masks it with "***" which breaks
@@ -235,12 +267,16 @@ async def process_ingestion_job(
 
                 colpali_vector_store = MultiVectorStore(uri=uri_final)
                 await asyncio.to_thread(colpali_vector_store.initialize)
+                logger.info("   ✅ ColPali MultiVectorStore initialized successfully")
             except Exception as e:
-                logger.warning(f"Failed to initialise ColPali MultiVectorStore for app {auth.app_id}: {e}")
+                logger.warning(f"   ⚠️ Failed to initialise ColPali MultiVectorStore for app {auth.app_id}: {e}")
+        else:
+            logger.info("   ⏩ Skipping ColPali setup (use_colpali=False)")
 
         # Build a fresh DocumentService scoped to this job/app so we don't
         # mutate the shared instance kept in *ctx* (avoids cross-talk between
         # concurrent jobs for different apps).
+        logger.info("   🔄 Creating DocumentService instance...")
         document_service = DocumentService(
             storage=ctx["storage"],
             database=database,
@@ -252,38 +288,65 @@ async def process_ingestion_job(
             colpali_embedding_model=ctx.get("colpali_embedding_model"),
             colpali_vector_store=colpali_vector_store,
         )
+        
+        colpali_setup_time = time.time() - colpali_setup_start
+        phase_times["colpali_docservice_setup"] = colpali_setup_time
+        logger.info(f"✅ PHASE 3 COMPLETE: ColPali and DocumentService setup took {colpali_setup_time:.3f}s")
 
         # 3. Download the file from storage
-        logger.info(f"Downloading file from {bucket}/{file_key}")
+        logger.info("📥 PHASE 4: Downloading file from storage...")
+        logger.info(f"   📂 Bucket: {bucket}")
+        logger.info(f"   🔑 Key: {file_key}")
         download_start = time.time()
+        
         file_content = await document_service.storage.download_file(bucket, file_key)
 
         # Ensure file_content is bytes
         if hasattr(file_content, "read"):
             file_content = file_content.read()
+        
         download_time = time.time() - download_start
         phase_times["download_file"] = download_time
-        logger.info(f"File download took {download_time:.2f}s for {len(file_content)/1024/1024:.2f}MB")
+        file_size_mb = len(file_content) / 1024 / 1024
+        logger.info(f"✅ PHASE 4 COMPLETE: File download took {download_time:.3f}s for {file_size_mb:.2f}MB")
+        logger.info(f"   📊 Download speed: {file_size_mb/download_time:.2f} MB/s" if download_time > 0 else "   📊 Download speed: instant")
 
         # 4. Parse file to text
+        logger.info("📝 PHASE 5: Parsing file to extract text...")
         # Use the filename derived from the storage key so the parser
         # receives the correct extension (.txt, .pdf, etc.).  Passing the UI
         # provided original_filename (often .pdf) can mislead the parser when
         # the stored object is a pre-extracted text file (e.g. .pdf.txt).
         parse_filename = os.path.basename(file_key) if file_key else original_filename
+        logger.info(f"   📄 Parse filename: {parse_filename}")
+        logger.info(f"   🔍 Content type: {content_type}")
+        logger.info(f"   📏 File size: {len(file_content)} bytes")
 
         parse_start = time.time()
         additional_metadata, text = await document_service.parser.parse_file_to_text(file_content, parse_filename)
-        logger.debug(f"Parsed file into text of length {len(text)} (filename used: {parse_filename})")
+        
         parse_time = time.time() - parse_start
         phase_times["parse_file"] = parse_time
+        
+        text_chars = len(text)
+        text_kb = text_chars / 1024
+        logger.info(f"✅ PHASE 5 COMPLETE: File parsing took {parse_time:.3f}s")
+        logger.info(f"   📊 Extracted text: {text_chars:,} characters ({text_kb:.1f} KB)")
+        logger.info(f"   🔍 Additional metadata keys: {list(additional_metadata.keys()) if additional_metadata else 'None'}")
+        if parse_time > 0:
+            logger.info(f"   ⚡ Parse speed: {text_kb/parse_time:.1f} KB/s")
 
         # NEW -----------------------------------------------------------------
+        logger.info("📏 PHASE 6: Estimating pages and checking limits...")
+        limits_start = time.time()
+        
         # Estimate pages early for pre-check
         num_pages_estimated = estimate_pages_by_chars(len(text))
+        logger.info(f"   📖 Estimated pages: {num_pages_estimated}")
 
         # 4.b Enforce tier limits (pages ingested) for cloud/free tier users
         if settings.MODE == "cloud" and auth.user_id:
+            logger.info(f"   🔍 Checking tier limits for user: {auth.user_id}")
             # Calculate approximate pages using same heuristic as DocumentService
             try:
                 # Dry-run verification before heavy processing
@@ -294,61 +357,88 @@ async def process_ingestion_job(
                     document_id,
                     verify_only=True,
                 )
+                logger.info("   ✅ User within tier limits")
             except Exception as limit_exc:
-                logger.error("User %s exceeded ingest limits: %s", auth.user_id, limit_exc)
+                logger.error(f"   ❌ User {auth.user_id} exceeded ingest limits: {limit_exc}")
                 raise
+        else:
+            logger.info("   ⏩ Skipping limits check (not cloud mode or no user_id)")
+        
+        limits_time = time.time() - limits_start
+        phase_times["limits_check"] = limits_time
+        logger.info(f"✅ PHASE 6 COMPLETE: Limits check took {limits_time:.3f}s")
         # ---------------------------------------------------------------------
 
         # === Apply post_parsing rules ===
+        logger.info("🔧 PHASE 7: Applying post-parsing rules...")
         rules_start = time.time()
         document_rule_metadata = {}
         if rules_list:
-            logger.info("Applying post-parsing rules...")
+            logger.info(f"   📋 Processing {len(rules_list)} post-parsing rules...")
+            logger.info(f"   📏 Text length before rules: {len(text):,} characters")
+            
             document_rule_metadata, text = await document_service.rules_processor.process_document_rules(
                 text, rules_list
             )
             metadata.update(document_rule_metadata)  # Merge metadata into main doc metadata
-            logger.info(f"Document metadata after post-parsing rules: {metadata}")
-            logger.info(f"Content length after post-parsing rules: {len(text)}")
+            
+            logger.info(f"   📊 Extracted metadata keys: {list(document_rule_metadata.keys()) if document_rule_metadata else 'None'}")
+            logger.info(f"   📏 Text length after rules: {len(text):,} characters")
+            logger.info(f"   🔗 Total metadata keys: {list(metadata.keys()) if metadata else 'None'}")
+        else:
+            logger.info("   ⏩ No post-parsing rules to apply")
+            
         rules_time = time.time() - rules_start
         phase_times["apply_post_parsing_rules"] = rules_time
-        if rules_list:
-            logger.info(f"Post-parsing rules processing took {rules_time:.2f}s")
+        logger.info(f"✅ PHASE 7 COMPLETE: Post-parsing rules processing took {rules_time:.3f}s")
 
         # 6. Retrieve the existing document
+        logger.info("📄 PHASE 8: Retrieving existing document from database...")
         retrieve_start = time.time()
-        logger.debug(f"Retrieving document with ID: {document_id}")
-        logger.debug(
-            f"Auth context: entity_type={auth.entity_type}, entity_id={auth.entity_id}, permissions={auth.permissions}"
-        )
+        logger.info(f"   🔍 Document ID: {document_id}")
+        logger.info(f"   🔐 Auth context: entity_type={auth.entity_type}, entity_id={auth.entity_id}")
+        logger.info(f"   🔑 Permissions: {auth.permissions}")
 
         # Use the retry helper function with initial delay to handle race conditions
+        logger.info("   🔄 Attempting document retrieval with retry logic...")
         doc = await get_document_with_retry(document_service, document_id, auth, max_retries=5, initial_delay=1.0)
         retrieve_time = time.time() - retrieve_start
         phase_times["retrieve_document"] = retrieve_time
-        logger.info(f"Document retrieval took {retrieve_time:.2f}s")
-
+        
         if not doc:
-            logger.error(f"Document {document_id} not found in database after multiple retries")
-            logger.error(
-                f"Details - file: {original_filename}, content_type: {content_type}, bucket: {bucket}, key: {file_key}"
-            )
-            logger.error(
-                f"Auth: entity_type={auth.entity_type}, entity_id={auth.entity_id}, permissions={auth.permissions}"
-            )
+            logger.error("   ❌ Document retrieval failed!")
+            logger.error(f"   📄 Document {document_id} not found in database after multiple retries")
+            logger.error(f"   📂 File details - name: {original_filename}, type: {content_type}")
+            logger.error(f"   🗃️ Storage - bucket: {bucket}, key: {file_key}")
+            logger.error(f"   🔐 Auth - entity: {auth.entity_type}, id: {auth.entity_id}, perms: {auth.permissions}")
             raise ValueError(f"Document {document_id} not found in database after multiple retries")
+        
+        logger.info(f"✅ PHASE 8 COMPLETE: Document retrieval took {retrieve_time:.3f}s")
+        logger.info(f"   📊 Document external_id: {doc.external_id}")
+        logger.info(f"   🏷️ Document status: {doc.system_metadata.get('status', 'unknown')}")
+        logger.info(f"   📋 Existing metadata keys: {list(doc.metadata.keys()) if doc.metadata else 'None'}")
 
         # Sanitize the extracted text
+        logger.info("🧹 PHASE 9: Sanitizing text and updating document...")
+        sanitize_start = time.time()
+        
+        original_text_len = len(text)
         sanitized_text = sanitize_text_for_db(text)
-        logger.debug(f"Sanitized text: removed {len(text) - len(sanitized_text)} problematic characters")
+        removed_chars = original_text_len - len(sanitized_text)
+        logger.info(f"   🧹 Text sanitization: removed {removed_chars} problematic characters")
+        if removed_chars > 0:
+            logger.info(f"   📊 Sanitized text: {original_text_len:,} → {len(sanitized_text):,} characters")
 
         # Prepare updates for the document
+        logger.info("   🔄 Preparing document metadata updates...")
         # Merge new metadata with existing metadata to preserve external_id
         merged_metadata = {**doc.metadata, **metadata}
         # Make sure external_id is preserved in the metadata
         merged_metadata["external_id"] = doc.external_id
+        logger.info(f"   📋 Merged metadata keys: {list(merged_metadata.keys())}")
 
         # Sanitize all metadata before storing in database
+        logger.info("   🧹 Sanitizing all metadata objects...")
         sanitized_merged_metadata = sanitize_metadata_for_db(merged_metadata)
         sanitized_additional_metadata = sanitize_metadata_for_db(additional_metadata)
         
@@ -364,40 +454,75 @@ async def process_ingestion_job(
         # Add folder_name and end_user_id to system_metadata if provided
         if folder_name:
             updates["system_metadata"]["folder_name"] = sanitize_text_for_db(folder_name)
+            logger.info(f"   📁 Added folder_name: {folder_name}")
         if end_user_id:
             updates["system_metadata"]["end_user_id"] = sanitize_text_for_db(end_user_id)
+            logger.info(f"   👤 Added end_user_id: {end_user_id}")
 
         # Update the document in the database
+        logger.info("   💾 Updating document in database...")
         update_start = time.time()
         success = await document_service.db.update_document(document_id=document_id, updates=updates, auth=auth)
         update_time = time.time() - update_start
         phase_times["update_document_parsed"] = update_time
-        logger.info(f"Initial document update took {update_time:.2f}s")
-
+        
         if not success:
+            logger.error("   ❌ Document update failed!")
             raise ValueError(f"Failed to update document {document_id}")
 
         # Refresh document object with updated data
+        logger.info("   🔄 Refreshing document object...")
         doc = await document_service.db.get_document(document_id, auth)
-        logger.debug("Updated document in database with parsed content")
+        
+        sanitize_total_time = time.time() - sanitize_start
+        phase_times["sanitize_and_update"] = sanitize_total_time
+        logger.info(f"✅ PHASE 9 COMPLETE: Sanitization and document update took {sanitize_total_time:.3f}s")
+        logger.info(f"   📊 Database update took {update_time:.3f}s")
 
         # 7. Split text into chunks
+        logger.info("✂️ PHASE 10: Splitting text into chunks...")
+        logger.info(f"   📏 Input text length: {len(text):,} characters")
+        logger.info(f"   ⚙️ Chunk size: {settings.CHUNK_SIZE}")
+        logger.info(f"   🔗 Chunk overlap: {settings.CHUNK_OVERLAP}")
+        
         chunking_start = time.time()
+        logger.info("   🔄 Starting text chunking process...")
+        
         parsed_chunks = await document_service.parser.split_text(text)
+        
+        chunking_time = time.time() - chunking_start
+        phase_times["split_into_chunks"] = chunking_time
+        
         if not parsed_chunks:
             # No text was extracted from the file.  In many cases (e.g. pure images)
             # we can still proceed if ColPali multivector chunks are produced later.
             # Therefore we defer the fatal check until after ColPali chunk creation.
             logger.warning(
-                "No text chunks extracted after parsing. Will attempt to continue "
+                "   ⚠️ No text chunks extracted after parsing. Will attempt to continue "
                 "and rely on image-based chunks if available."
             )
-        chunking_time = time.time() - chunking_start
-        phase_times["split_into_chunks"] = chunking_time
-        logger.info(f"Text chunking took {chunking_time:.2f}s to create {len(parsed_chunks)} chunks")
+        else:
+            # Log chunk statistics
+            chunk_sizes = [len(chunk.content) for chunk in parsed_chunks]
+            avg_chunk_size = sum(chunk_sizes) / len(chunk_sizes) if chunk_sizes else 0
+            min_chunk_size = min(chunk_sizes) if chunk_sizes else 0
+            max_chunk_size = max(chunk_sizes) if chunk_sizes else 0
+            
+            logger.info(f"✅ PHASE 10 COMPLETE: Text chunking took {chunking_time:.3f}s")
+            logger.info(f"   📊 Created {len(parsed_chunks)} chunks")
+            logger.info(f"   📏 Chunk sizes - avg: {avg_chunk_size:.0f}, min: {min_chunk_size}, max: {max_chunk_size}")
+            logger.info(f"   ⚡ Chunking speed: {len(text)/chunking_time:.0f} chars/sec" if chunking_time > 0 else "   ⚡ Chunking speed: instant")
+            
+            # Warning for slow chunking
+            if chunking_time > 60:  # More than 1 minute
+                logger.warning(f"   🐌 SLOW CHUNKING DETECTED: {chunking_time:.1f}s is unusually slow!")
+            elif chunking_time > 10:  # More than 10 seconds
+                logger.warning(f"   ⏰ Chunking took longer than expected: {chunking_time:.1f}s")
 
         # Decide whether we need image chunks either for ColPali embedding or because
         # there are image-based rules (use_images=True) that must process them.
+        logger.info("🎨 PHASE 11: Analyzing image chunk requirements and creating ColPali chunks...")
+        
         has_image_rules = any(
             r.get("stage", "post_parsing") == "post_chunking"
             and r.get("type") == "metadata_extraction"
@@ -410,31 +535,49 @@ async def process_ingestion_job(
         )
 
         should_create_image_chunks = has_image_rules or using_colpali
+        
+        logger.info(f"   🔍 Image rules detected: {has_image_rules}")
+        logger.info(f"   🎨 ColPali available: {using_colpali}")
+        logger.info(f"   🤔 Should create image chunks: {should_create_image_chunks}")
 
         # Start timer for optional image chunk creation / multivector processing
         colpali_processing_start = time.time()
 
         chunks_multivector = []
         if should_create_image_chunks:
+            logger.info("   🔄 Creating multivector/image chunks...")
             import base64
-
             import filetype
 
             file_type = filetype.guess(file_content)
+            logger.info(f"   📄 Detected file type: {file_type}")
+            
+            logger.info("   🔄 Encoding file content to base64...")
             file_content_base64 = base64.b64encode(file_content).decode()
+            logger.info(f"   📊 Base64 encoded size: {len(file_content_base64):,} characters")
 
             # Use the parsed chunks for ColPali/image rules – this will create image chunks if appropriate
+            logger.info("   🔄 Creating chunks using _create_chunks_multivector...")
             chunks_multivector = document_service._create_chunks_multivector(
                 file_type, file_content_base64, file_content, parsed_chunks
             )
-            logger.debug(
-                f"Created {len(chunks_multivector)} multivector/image chunks "
-                f"(has_image_rules={has_image_rules}, using_colpali={using_colpali})"
-            )
+            logger.info(f"   ✅ Created {len(chunks_multivector)} multivector/image chunks")
+        else:
+            logger.info("   ⏩ Skipping image chunk creation (not needed)")
+            
         colpali_create_chunks_time = time.time() - colpali_processing_start
         phase_times["colpali_create_chunks"] = colpali_create_chunks_time
-        if using_colpali:
-            logger.info(f"Colpali chunk creation took {colpali_create_chunks_time:.2f}s")
+        
+        logger.info(f"✅ PHASE 11 COMPLETE: ColPali chunk creation took {colpali_create_chunks_time:.3f}s")
+        if should_create_image_chunks:
+            logger.info(f"   📊 Image chunks created: {len(chunks_multivector)}")
+            logger.info(f"   ⚡ Creation speed: {len(chunks_multivector)/colpali_create_chunks_time:.1f} chunks/sec" if colpali_create_chunks_time > 0 else "   ⚡ Creation speed: instant")
+            
+            # Warning for slow ColPali chunk creation
+            if colpali_create_chunks_time > 120:  # More than 2 minutes
+                logger.warning(f"   🐌 SLOW COLPALI CHUNK CREATION: {colpali_create_chunks_time:.1f}s is unusually slow!")
+            elif colpali_create_chunks_time > 30:  # More than 30 seconds
+                logger.warning(f"   ⏰ ColPali chunk creation took longer than expected: {colpali_create_chunks_time:.1f}s")
 
         # If we still have no chunks at all (neither text nor image) abort early
         if not parsed_chunks and not chunks_multivector:
@@ -452,13 +595,16 @@ async def process_ingestion_job(
         colpali_count_for_limit_fn = len(chunks_multivector) if using_colpali else None
 
         # 9. Apply post_chunking rules and aggregate metadata
+        logger.info("🔧 PHASE 12: Applying post-chunking rules and processing chunks...")
+        post_chunking_start = time.time()
+        
         processed_chunks = []
         processed_chunks_multivector = []
         aggregated_chunk_metadata: Dict[str, Any] = {}  # Initialize dict for aggregated metadata
         chunk_contents = []  # Initialize list to collect chunk contents as we process them
 
         if rules_list:
-            logger.info("Applying post-chunking rules...")
+            logger.info(f"   📋 Found {len(rules_list)} total rules to process...")
 
             # Partition rules by type
             text_rules = []
@@ -472,12 +618,14 @@ async def process_ingestion_job(
                     else:
                         text_rules.append(rule_dict)
 
-            logger.info(f"Partitioned rules: {len(text_rules)} text rules, {len(image_rules)} image rules")
+            logger.info(f"   🔍 Partitioned rules: {len(text_rules)} text rules, {len(image_rules)} image rules")
 
             # Process regular text chunks with text rules only
             if text_rules:
-                logger.info(f"Applying {len(text_rules)} text rules to text chunks...")
-                for chunk_obj in parsed_chunks:
+                logger.info(f"   🔄 Applying {len(text_rules)} text rules to {len(parsed_chunks)} text chunks...")
+                for i, chunk_obj in enumerate(parsed_chunks, 1):
+                    if i % 50 == 0:  # Log progress every 50 chunks
+                        logger.info(f"   📊 Processing text chunk {i}/{len(parsed_chunks)}...")
                     # Get metadata *and* the potentially modified chunk
                     chunk_rule_metadata, processed_chunk = await document_service.rules_processor.process_chunk_rules(
                         chunk_obj, text_rules
@@ -486,15 +634,21 @@ async def process_ingestion_job(
                     chunk_contents.append(processed_chunk.content)  # Collect content as we process
                     # Aggregate the metadata extracted from this chunk
                     aggregated_chunk_metadata.update(chunk_rule_metadata)
+                logger.info(f"   ✅ Completed text rules processing for {len(processed_chunks)} chunks")
             else:
+                logger.info("   ⏩ No text rules to apply, using original chunks")
                 processed_chunks = parsed_chunks  # No text rules, use original chunks
 
             # Process colpali image chunks with image rules if they exist
             if chunks_multivector and image_rules:
-                logger.info(f"Applying {len(image_rules)} image rules to image chunks...")
-                for chunk_obj in chunks_multivector:
+                logger.info(f"   🔄 Applying {len(image_rules)} image rules to {len(chunks_multivector)} image chunks...")
+                image_chunks_processed = 0
+                for i, chunk_obj in enumerate(chunks_multivector, 1):
                     # Only process if it's an image chunk - pass the image content to the rule
                     if chunk_obj.metadata.get("is_image", False):
+                        image_chunks_processed += 1
+                        if image_chunks_processed % 20 == 0:  # Log progress every 20 image chunks
+                            logger.info(f"   📊 Processing image chunk {image_chunks_processed}...")
                         # Get metadata *and* the potentially modified chunk
                         chunk_rule_metadata, processed_chunk = (
                             await document_service.rules_processor.process_chunk_rules(chunk_obj, image_rules)
@@ -506,69 +660,115 @@ async def process_ingestion_job(
                         # Non-image chunks from multivector don't need further processing
                         processed_chunks_multivector.append(chunk_obj)
 
-                logger.info(f"Finished applying image rules to {len(processed_chunks_multivector)} image chunks.")
+                logger.info(f"   ✅ Completed image rules processing for {image_chunks_processed} image chunks")
             elif chunks_multivector:
                 # No image rules, use original multivector chunks
+                logger.info("   ⏩ No image rules to apply, using original multivector chunks")
                 processed_chunks_multivector = chunks_multivector
 
-            logger.info(f"Finished applying post-chunking rules to {len(processed_chunks)} regular chunks.")
-            logger.info(f"Aggregated metadata from all chunks: {aggregated_chunk_metadata}")
+            logger.info(f"   📊 Final results - text chunks: {len(processed_chunks)}, multivector chunks: {len(processed_chunks_multivector)}")
+            logger.info(f"   📋 Aggregated metadata keys: {list(aggregated_chunk_metadata.keys()) if aggregated_chunk_metadata else 'None'}")
 
             # Update the document content with the stitched content from processed chunks
             if processed_chunks:
-                logger.info("Updating document content with processed chunks...")
+                logger.info("   🔄 Updating document content with processed chunks...")
                 stitched_content = "\n".join(chunk_contents)
+                original_stitched_len = len(stitched_content)
                 # Sanitize the stitched content before storing
                 sanitized_stitched_content = sanitize_text_for_db(stitched_content)
-                logger.debug(f"Sanitized stitched content: removed {len(stitched_content) - len(sanitized_stitched_content)} problematic characters")
+                removed_chars = original_stitched_len - len(sanitized_stitched_content)
+                if removed_chars > 0:
+                    logger.info(f"   🧹 Sanitized stitched content: removed {removed_chars} problematic characters")
                 # Apply sanitization to the entire system_metadata object
                 doc.system_metadata["content"] = sanitized_stitched_content
                 doc.system_metadata = sanitize_metadata_for_db(doc.system_metadata)
-                logger.info(f"Updated document content with stitched chunks (length: {len(sanitized_stitched_content)})")
+                logger.info(f"   ✅ Updated document content length: {len(sanitized_stitched_content):,} characters")
         else:
+            logger.info("   ⏩ No post-chunking rules to apply")
             processed_chunks = parsed_chunks  # No rules, use original chunks
             processed_chunks_multivector = chunks_multivector  # No rules, use original multivector chunks
+            
+        post_chunking_time = time.time() - post_chunking_start
+        phase_times["apply_post_chunking_rules"] = post_chunking_time
+        logger.info(f"✅ PHASE 12 COMPLETE: Post-chunking rules processing took {post_chunking_time:.3f}s")
+        
+        # Warning for slow post-chunking rules
+        if post_chunking_time > 300:  # More than 5 minutes
+            logger.warning(f"   🐌 SLOW POST-CHUNKING RULES: {post_chunking_time:.1f}s is unusually slow!")
+        elif post_chunking_time > 60:  # More than 1 minute
+            logger.warning(f"   ⏰ Post-chunking rules took longer than expected: {post_chunking_time:.1f}s")
 
         # 10. Generate embeddings for processed chunks
+        logger.info("🧠 PHASE 13: Generating embeddings for text chunks...")
+        logger.info(f"   📊 Chunks to embed: {len(processed_chunks)}")
+        logger.info(f"   🔗 Embedding model: {settings.EMBEDDING_MODEL}")
+        
         embedding_start = time.time()
+        logger.info("   🔄 Starting embedding generation...")
+        
         embeddings = await document_service.embedding_model.embed_for_ingestion(processed_chunks)
-        logger.debug(f"Generated {len(embeddings)} embeddings")
+        
         embedding_time = time.time() - embedding_start
         phase_times["generate_embeddings"] = embedding_time
         embeddings_per_second = len(embeddings) / embedding_time if embedding_time > 0 else 0
-        logger.info(
-            f"Embedding generation took {embedding_time:.2f}s for {len(embeddings)} embeddings "
-            f"({embeddings_per_second:.2f} embeddings/s)"
-        )
+        
+        logger.info(f"✅ PHASE 13 COMPLETE: Embedding generation took {embedding_time:.3f}s")
+        logger.info(f"   📊 Generated {len(embeddings)} embeddings")
+        logger.info(f"   ⚡ Embedding speed: {embeddings_per_second:.2f} embeddings/sec")
+        
+        # Warning for slow embedding
+        if embedding_time > 300:  # More than 5 minutes
+            logger.warning(f"   🐌 SLOW EMBEDDING GENERATION: {embedding_time:.1f}s is unusually slow!")
+        elif embedding_time > 60:  # More than 1 minute
+            logger.warning(f"   ⏰ Embedding generation took longer than expected: {embedding_time:.1f}s")
 
         # 11. Create chunk objects with potentially modified chunk content and metadata
+        logger.info("📦 PHASE 14: Creating chunk objects...")
+        logger.info(f"   📊 Chunks: {len(processed_chunks)}, Embeddings: {len(embeddings)}")
+        
         chunk_objects_start = time.time()
         chunk_objects = document_service._create_chunk_objects(doc.external_id, processed_chunks, embeddings)
-        logger.debug(f"Created {len(chunk_objects)} chunk objects")
         chunk_objects_time = time.time() - chunk_objects_start
         phase_times["create_chunk_objects"] = chunk_objects_time
-        logger.debug(f"Creating chunk objects took {chunk_objects_time:.2f}s")
+        
+        logger.info(f"✅ PHASE 14 COMPLETE: Creating chunk objects took {chunk_objects_time:.3f}s")
+        logger.info(f"   📦 Created {len(chunk_objects)} chunk objects")
 
         # 12. Handle ColPali embeddings
+        logger.info("🎨 PHASE 15: Generating ColPali embeddings...")
         colpali_embed_start = time.time()
         chunk_objects_multivector = []
+        
         if using_colpali:
+            logger.info(f"   📊 Multivector chunks to embed: {len(processed_chunks_multivector)}")
+            logger.info("   🔄 Starting ColPali embedding generation...")
+            
             colpali_embeddings = await document_service.colpali_embedding_model.embed_for_ingestion(
                 processed_chunks_multivector
             )
-            logger.debug(f"Generated {len(colpali_embeddings)} embeddings for multivector embedding")
+            logger.info(f"   ✅ Generated {len(colpali_embeddings)} ColPali embeddings")
 
+            logger.info("   📦 Creating ColPali chunk objects...")
             chunk_objects_multivector = document_service._create_chunk_objects(
                 doc.external_id, processed_chunks_multivector, colpali_embeddings
             )
+            logger.info(f"   📦 Created {len(chunk_objects_multivector)} ColPali chunk objects")
+        else:
+            logger.info("   ⏩ Skipping ColPali embedding (not using ColPali)")
+            
         colpali_embed_time = time.time() - colpali_embed_start
         phase_times["colpali_generate_embeddings"] = colpali_embed_time
+        
+        logger.info(f"✅ PHASE 15 COMPLETE: ColPali embedding took {colpali_embed_time:.3f}s")
         if using_colpali:
             embeddings_per_second = len(colpali_embeddings) / colpali_embed_time if colpali_embed_time > 0 else 0
-            logger.info(
-                f"Colpali embedding took {colpali_embed_time:.2f}s for {len(colpali_embeddings)} embeddings "
-                f"({embeddings_per_second:.2f} embeddings/s)"
-            )
+            logger.info(f"   ⚡ ColPali embedding speed: {embeddings_per_second:.2f} embeddings/sec")
+            
+            # Warning for slow ColPali embedding
+            if colpali_embed_time > 600:  # More than 10 minutes
+                logger.warning(f"   🐌 SLOW COLPALI EMBEDDING: {colpali_embed_time:.1f}s is unusually slow!")
+            elif colpali_embed_time > 120:  # More than 2 minutes
+                logger.warning(f"   ⏰ ColPali embedding took longer than expected: {colpali_embed_time:.1f}s")
 
         # === Merge aggregated chunk metadata into document metadata ===
         if aggregated_chunk_metadata:
@@ -582,11 +782,15 @@ async def process_ingestion_job(
             logger.info(f"Final document metadata after merge: {doc.metadata}")
         # ===========================================================
 
+        logger.info("💾 PHASE 16: Final document preparation and storage...")
+        logger.info("   🔄 Preparing document for final storage...")
+        
         # Update document status to completed before storing
         doc.system_metadata["status"] = "completed"
         doc.system_metadata["updated_at"] = datetime.now(UTC)
         
         # Sanitize system_metadata before final update
+        logger.info("   🧹 Final sanitization of all metadata...")
         doc.system_metadata = sanitize_metadata_for_db(doc.system_metadata)
         # Sanitize other metadata fields as well
         doc.metadata = sanitize_metadata_for_db(doc.metadata)
@@ -594,31 +798,74 @@ async def process_ingestion_job(
             doc.additional_metadata = sanitize_metadata_for_db(doc.additional_metadata)
 
         # 11. Store chunks and update document with is_update=True
+        logger.info(f"   💾 Storing {len(chunk_objects)} text chunks and {len(chunk_objects_multivector)} ColPali chunks...")
         store_start = time.time()
+        
         await document_service._store_chunks_and_doc(
             chunk_objects, doc, use_colpali, chunk_objects_multivector, is_update=True, auth=auth
         )
+        
         store_time = time.time() - store_start
         phase_times["store_chunks_and_update_doc"] = store_time
-        logger.info(f"Storing chunks and final document update took {store_time:.2f}s for {len(chunk_objects)} chunks")
+        
+        logger.info(f"✅ PHASE 16 COMPLETE: Final storage took {store_time:.3f}s")
+        logger.info(f"   📊 Stored {len(chunk_objects)} text chunks")
+        if chunk_objects_multivector:
+            logger.info(f"   📊 Stored {len(chunk_objects_multivector)} ColPali chunks")
+        
+        # Warning for slow storage
+        if store_time > 300:  # More than 5 minutes
+            logger.warning(f"   🐌 SLOW DOCUMENT STORAGE: {store_time:.1f}s is unusually slow!")
+        elif store_time > 60:  # More than 1 minute
+            logger.warning(f"   ⏰ Document storage took longer than expected: {store_time:.1f}s")
 
-        logger.debug(f"Successfully completed processing for document {doc.external_id}")
+        logger.info(f"🎉 Successfully completed processing for document {doc.external_id}")
 
         # 13. Log successful completion
-        logger.info(f"Successfully completed ingestion for {original_filename}, document ID: {doc.external_id}")
+        logger.info("="*80)
+        logger.info(f"🎉 INGESTION COMPLETED SUCCESSFULLY!")
+        logger.info(f"📄 File: {original_filename}")
+        logger.info(f"📦 Document ID: {doc.external_id}")
+        logger.info("="*80)
         # Performance summary
         total_time = time.time() - job_start_time
 
-        # Log performance summary
-        logger.info("=== Ingestion Performance Summary ===")
-        logger.info(f"Total processing time: {total_time:.2f}s")
-        for phase, duration in sorted(phase_times.items(), key=lambda x: x[1], reverse=True):
+        # Log detailed performance summary
+        logger.info("📊 DETAILED PERFORMANCE SUMMARY")
+        logger.info("="*80)
+        logger.info(f"🕐 TOTAL PROCESSING TIME: {total_time:.3f}s ({total_time/60:.1f} minutes)")
+        logger.info("-"*80)
+        
+        # Sort phases by duration (slowest first) for easy identification of bottlenecks
+        sorted_phases = sorted(phase_times.items(), key=lambda x: x[1], reverse=True)
+        
+        for i, (phase, duration) in enumerate(sorted_phases, 1):
             percentage = (duration / total_time) * 100 if total_time > 0 else 0
-            logger.info(f"  - {phase}: {duration:.2f}s ({percentage:.1f}%)")
-        logger.info("=====================================")
+            
+            # Add visual indicators for slow phases
+            if percentage > 50:
+                indicator = "🚨"  # Critical - over 50% of time
+            elif percentage > 25:
+                indicator = "⚠️"   # Warning - over 25% of time
+            elif percentage > 10:
+                indicator = "📍"  # Notable - over 10% of time
+            else:
+                indicator = "✅"  # Normal
+            
+            logger.info(f"{indicator} #{i:2d}. {phase:<35} {duration:8.3f}s ({percentage:5.1f}%)")
+        
+        logger.info("-"*80)
+        logger.info(f"📊 FILE SIZE: {len(file_content)/1024/1024:.2f} MB")
+        logger.info(f"📄 TEXT EXTRACTED: {len(text):,} characters")
+        logger.info(f"📦 TEXT CHUNKS: {len(processed_chunks)}")
+        logger.info(f"🎨 COLPALI CHUNKS: {len(chunk_objects_multivector)}")
+        logger.info(f"📖 FINAL PAGE COUNT: {final_page_count}")
+        logger.info(f"⚡ OVERALL SPEED: {len(text)/(total_time*1024):.1f} KB/s")
+        logger.info("="*80)
 
         # Record ingest usage *after* successful completion using the final page count
         if settings.MODE == "cloud" and auth.user_id:
+            logger.info("📊 Recording usage limits...")
             try:
                 await check_and_increment_limits(
                     auth,
@@ -628,21 +875,46 @@ async def process_ingestion_job(
                     use_colpali=using_colpali,
                     colpali_chunks_count=colpali_count_for_limit_fn,
                 )
+                logger.info("✅ Usage limits recorded successfully")
             except Exception as rec_exc:
-                logger.error("Failed to record ingest usage after completion: %s", rec_exc)
+                logger.error(f"❌ Failed to record ingest usage after completion: {rec_exc}")
+        else:
+            logger.info("⏩ Skipping usage limits recording (not cloud mode)")
 
         # 14. Return document ID
-        return {
+        logger.info("🎯 RETURNING SUCCESS RESULT")
+        result = {
             "document_id": document_id,
             "status": "completed",
             "filename": original_filename,
             "content_type": content_type,
             "timestamp": datetime.now(UTC).isoformat(),
+            "processing_time_seconds": total_time,
+            "chunks_created": len(chunk_objects),
+            "colpali_chunks_created": len(chunk_objects_multivector),
+            "pages_processed": final_page_count,
         }
+        logger.info(f"📋 Result: {result}")
+        return result
 
     except Exception as e:
-        # ... (rest of the function remains the same)
-        logger.error(f"Error processing ingestion job for file {original_filename}: {str(e)}")
+        # Calculate elapsed time for error reporting
+        error_time = time.time() - job_start_time
+        logger.error("="*80)
+        logger.error("❌ INGESTION JOB FAILED!")
+        logger.error(f"📄 File: {original_filename}")
+        logger.error(f"📦 Document ID: {document_id}")
+        logger.error(f"⏱️ Failed after: {error_time:.3f}s ({error_time/60:.1f} minutes)")
+        logger.error(f"🔥 Error: {str(e)}")
+        logger.error("="*80)
+        
+        # Log phase times up to the point of failure
+        if phase_times:
+            logger.error("📊 PHASES COMPLETED BEFORE FAILURE:")
+            for phase, duration in phase_times.items():
+                percentage = (duration / error_time) * 100 if error_time > 0 else 0
+                logger.error(f"   ✅ {phase}: {duration:.3f}s ({percentage:.1f}%)")
+            logger.error("-"*80)
 
         # ------------------------------------------------------------------
         # Ensure we update the *per-app* database where the document lives.
