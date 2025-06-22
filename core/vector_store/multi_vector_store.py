@@ -18,6 +18,7 @@ from core.storage.base_storage import BaseStorage
 from core.storage.local_storage import LocalStorage
 from core.storage.s3_storage import S3Storage
 from core.storage.utils_file_extensions import detect_file_type
+from core.utils.text_sanitization import sanitize_text_for_db
 
 from .base_vector_store import BaseVectorStore
 
@@ -455,6 +456,8 @@ class MultiVectorStore(BaseVectorStore):
 
     async def store_embeddings(self, chunks: List[DocumentChunk]) -> Tuple[bool, List[str]]:
         """Store document chunks with their multi-vector embeddings."""
+        from core.utils.text_sanitization import sanitize_text_for_db
+        
         # Prepare a list of row tuples for executemany
         rows = []
         for chunk in chunks:
@@ -464,13 +467,13 @@ class MultiVectorStore(BaseVectorStore):
 
             binary_embeddings = self._binary_quantize(chunk.embedding)
 
-            # Handle content storage (external vs database)
-            content_to_store = chunk.content
+            # Handle content storage (external vs database) with sanitization
+            content_to_store = sanitize_text_for_db(chunk.content)  # Sanitize for PostgreSQL
 
             if self.enable_external_storage and self.storage:
                 # Try to store content externally
                 storage_key = await self._store_content_externally(
-                    chunk.content, chunk.document_id, chunk.chunk_number, str(chunk.metadata)
+                    content_to_store, chunk.document_id, chunk.chunk_number, str(chunk.metadata)
                 )
 
                 if storage_key:

@@ -11,6 +11,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.types import UserDefinedType
 
 from core.models.chunk import DocumentChunk
+from core.utils.text_sanitization import sanitize_text_for_db
 
 from .base_vector_store import BaseVectorStore
 
@@ -364,6 +365,7 @@ class PGVectorStore(BaseVectorStore):
         This avoids per-row overhead and cuts the SQL round-trips from *n*
         to 1, yielding a ~5-10× throughput boost for large documents.
         """
+        from core.utils.text_sanitization import sanitize_text_for_db
 
         if not chunks:
             return True, []
@@ -373,7 +375,7 @@ class PGVectorStore(BaseVectorStore):
             {
                 "document_id": c.document_id,
                 "chunk_number": c.chunk_number,
-                "content": c.content,
+                "content": sanitize_text_for_db(c.content),  # Sanitize chunk content for PostgreSQL
                 "chunk_metadata": json.dumps(c.metadata or {}),
                 "embedding": c.embedding,
             }
