@@ -1060,8 +1060,8 @@ async def startup(ctx):
     # Initialize ColPali embedding model and vector store per mode
     colpali_embedding_model = None
     colpali_vector_store = None
-
-    if settings.COLPALI_MODE != "off":
+    should_use_colpali = False # settings.COLPALI_MODE != "off"
+    if should_use_colpali:
         logger.info(f"Initializing ColPali components (mode={settings.COLPALI_MODE}) ...")
         # Choose embedding implementation
         match settings.COLPALI_MODE:
