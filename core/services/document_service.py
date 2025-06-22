@@ -853,20 +853,15 @@ class DocumentService:
             logger.info(f"Document metadata after post-parsing rules: {metadata}")
             logger.info(f"Content length after post-parsing rules: {len(content)}")
 
-        # Sanitize and store full content before chunking
-        def sanitize_text_for_db(text: str) -> str:
-            """Remove null bytes and other characters that PostgreSQL can't handle."""
-            if not text:
-                return text
-            # Remove null bytes and other control characters except newlines and tabs
-            sanitized = text.replace('\u0000', '')  # Remove null bytes
-            # Optionally remove other problematic control characters (but keep \n, \t, \r)
-            import re
-            sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', sanitized)
-            return sanitized
+        # Import sanitization utilities
+        from core.utils.text_sanitization import sanitize_text_for_db, sanitize_metadata_for_db
         
         sanitized_content = sanitize_text_for_db(content)
         doc.system_metadata["content"] = sanitized_content
+        
+        # Sanitize all metadata fields
+        doc.metadata = sanitize_metadata_for_db(doc.metadata)
+        doc.system_metadata = sanitize_metadata_for_db(doc.system_metadata)
 
         # Split text into chunks
         parsed_chunks = await self.parser.split_text(content)
@@ -898,7 +893,9 @@ class DocumentService:
                 stitched_content = "\n".join(chunk_contents)
                 sanitized_stitched_content = sanitize_text_for_db(stitched_content)
                 doc.system_metadata["content"] = sanitized_stitched_content
-                logger.info(f"Updated document content with stitched chunks (length: {len(sanitized_stitched_content)})")
+                # Sanitize all metadata before storing
+                doc.system_metadata = sanitize_metadata_for_db(doc.system_metadata)
+                logger.info(f"Updated system_metadata['content'] with content of length {len(sanitized_stitched_content)}")
         else:
             processed_chunks = parsed_chunks  # No rules, use original chunks
 
@@ -928,8 +925,12 @@ class DocumentService:
             # Make sure doc.metadata exists
             if not hasattr(doc, "metadata") or doc.metadata is None:
                 doc.metadata = {}
-            doc.metadata.update(aggregated_chunk_metadata)
+            # Sanitize aggregated metadata before merging
+            sanitized_aggregated_metadata = sanitize_metadata_for_db(aggregated_chunk_metadata)
+            doc.metadata.update(sanitized_aggregated_metadata)
             logger.info(f"Final document metadata after merge: {doc.metadata}")
+            # Clear the temporary metadata
+            self._last_aggregated_metadata = {}
         # ===========================================================
 
         # Store everything
@@ -1955,6 +1956,8 @@ class DocumentService:
             # Always update the content in system_metadata with sanitization
             sanitized_updated_content = sanitize_text_for_db(updated_content)
             doc.system_metadata["content"] = sanitized_updated_content
+            # Sanitize all metadata before storing
+            doc.system_metadata = sanitize_metadata_for_db(doc.system_metadata)
             logger.info(f"Updated system_metadata['content'] with content of length {len(sanitized_updated_content)}")
         else:
             updated_content = current_content
@@ -1982,6 +1985,8 @@ class DocumentService:
                 logger.info("Updating document content with stitched content from processed chunks...")
                 sanitized_stitched_content = sanitize_text_for_db(stitched_content)
                 doc.system_metadata["content"] = sanitized_stitched_content
+                # Sanitize all metadata before storing
+                doc.system_metadata = sanitize_metadata_for_db(doc.system_metadata)
                 logger.info(f"Updated document content with stitched chunks (length: {len(sanitized_stitched_content)})")
 
         # Merge any aggregated metadata from chunk rules
@@ -1990,7 +1995,9 @@ class DocumentService:
             # Make sure doc.metadata exists
             if not hasattr(doc, "metadata") or doc.metadata is None:
                 doc.metadata = {}
-            doc.metadata.update(self._last_aggregated_metadata)
+            # Sanitize aggregated metadata before merging
+            sanitized_aggregated_metadata = sanitize_metadata_for_db(self._last_aggregated_metadata)
+            doc.metadata.update(sanitized_aggregated_metadata)
             logger.info(f"Final document metadata after merge: {doc.metadata}")
             # Clear the temporary metadata
             self._last_aggregated_metadata = {}
@@ -2176,9 +2183,17 @@ class DocumentService:
 
     async def _update_document_metadata_only(self, doc: Document, auth: AuthContext) -> Optional[Document]:
         """Update document metadata without reprocessing chunks."""
+        
+        # Import sanitization utilities
+        from core.utils.text_sanitization import sanitize_metadata_for_db
+        
+        # Sanitize all metadata before storing
+        sanitized_metadata = sanitize_metadata_for_db(doc.metadata) if doc.metadata else {}
+        sanitized_system_metadata = sanitize_metadata_for_db(doc.system_metadata) if doc.system_metadata else {}
+        
         updates = {
-            "metadata": doc.metadata,
-            "system_metadata": doc.system_metadata,
+            "metadata": sanitized_metadata,
+            "system_metadata": sanitized_system_metadata,
             "filename": doc.filename,
             "storage_files": doc.storage_files if hasattr(doc, "storage_files") else None,
             "storage_info": doc.storage_info if hasattr(doc, "storage_info") else None,
@@ -2462,10 +2477,14 @@ class DocumentService:
         file: Optional[UploadFile],
     ):
         """Update document metadata and version tracking."""
+        
+        # Import sanitization utilities
+        from core.utils.text_sanitization import sanitize_text_for_db, sanitize_metadata_for_db
 
-        # Merge/replace metadata
+        # Merge/replace metadata with sanitization
         if metadata:
-            doc.metadata.update(metadata)
+            sanitized_metadata = sanitize_metadata_for_db(metadata)
+            doc.metadata.update(sanitized_metadata)
 
         # Ensure external_id is preserved
         doc.metadata["external_id"] = doc.external_id
@@ -2483,11 +2502,15 @@ class DocumentService:
             "strategy": update_strategy,
         }
         if file:
-            entry["filename"] = file.filename
+            entry["filename"] = sanitize_text_for_db(file.filename) if file.filename else ""
         if metadata:
             entry["metadata_updated"] = True
 
         history.append(entry)
+        
+        # Sanitize the entire metadata and system_metadata after all updates
+        doc.metadata = sanitize_metadata_for_db(doc.metadata)
+        doc.system_metadata = sanitize_metadata_for_db(doc.system_metadata)
 
     # ------------------------------------------------------------------
     # Helper – choose bucket per app (isolation)

@@ -154,16 +154,9 @@ async def process_ingestion_job(
 ) -> Dict[str, Any]:
     """Process ingestion job with text sanitization to handle PostgreSQL compatibility."""
     
-    def sanitize_text_for_db(text: str) -> str:
-        """Remove null bytes and other characters that PostgreSQL can't handle."""
-        if not text:
-            return text
-        # Remove null bytes and other control characters except newlines and tabs
-        sanitized = text.replace('\u0000', '')  # Remove null bytes
-        # Optionally remove other problematic control characters (but keep \n, \t, \r)
-        import re
-        sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', sanitized)
-        return sanitized
+    # Import sanitization utilities
+    from core.utils.text_sanitization import sanitize_text_for_db, sanitize_metadata_for_db
+
     """
     Background worker task that processes file ingestion jobs.
 
@@ -355,17 +348,24 @@ async def process_ingestion_job(
         # Make sure external_id is preserved in the metadata
         merged_metadata["external_id"] = doc.external_id
 
+        # Sanitize all metadata before storing in database
+        sanitized_merged_metadata = sanitize_metadata_for_db(merged_metadata)
+        sanitized_additional_metadata = sanitize_metadata_for_db(additional_metadata)
+        
+        # Create sanitized system_metadata
+        sanitized_system_metadata = sanitize_metadata_for_db({**doc.system_metadata, "content": sanitized_text})
+
         updates = {
-            "metadata": merged_metadata,
-            "additional_metadata": additional_metadata,
-            "system_metadata": {**doc.system_metadata, "content": sanitized_text},
+            "metadata": sanitized_merged_metadata,
+            "additional_metadata": sanitized_additional_metadata,
+            "system_metadata": sanitized_system_metadata,
         }
 
         # Add folder_name and end_user_id to system_metadata if provided
         if folder_name:
-            updates["system_metadata"]["folder_name"] = folder_name
+            updates["system_metadata"]["folder_name"] = sanitize_text_for_db(folder_name)
         if end_user_id:
-            updates["system_metadata"]["end_user_id"] = end_user_id
+            updates["system_metadata"]["end_user_id"] = sanitize_text_for_db(end_user_id)
 
         # Update the document in the database
         update_start = time.time()
@@ -521,7 +521,9 @@ async def process_ingestion_job(
                 # Sanitize the stitched content before storing
                 sanitized_stitched_content = sanitize_text_for_db(stitched_content)
                 logger.debug(f"Sanitized stitched content: removed {len(stitched_content) - len(sanitized_stitched_content)} problematic characters")
+                # Apply sanitization to the entire system_metadata object
                 doc.system_metadata["content"] = sanitized_stitched_content
+                doc.system_metadata = sanitize_metadata_for_db(doc.system_metadata)
                 logger.info(f"Updated document content with stitched chunks (length: {len(sanitized_stitched_content)})")
         else:
             processed_chunks = parsed_chunks  # No rules, use original chunks
@@ -574,13 +576,22 @@ async def process_ingestion_job(
             # Make sure doc.metadata exists
             if not hasattr(doc, "metadata") or doc.metadata is None:
                 doc.metadata = {}
-            doc.metadata.update(aggregated_chunk_metadata)
+            # Sanitize the aggregated metadata before merging
+            sanitized_aggregated_metadata = sanitize_metadata_for_db(aggregated_chunk_metadata)
+            doc.metadata.update(sanitized_aggregated_metadata)
             logger.info(f"Final document metadata after merge: {doc.metadata}")
         # ===========================================================
 
         # Update document status to completed before storing
         doc.system_metadata["status"] = "completed"
         doc.system_metadata["updated_at"] = datetime.now(UTC)
+        
+        # Sanitize system_metadata before final update
+        doc.system_metadata = sanitize_metadata_for_db(doc.system_metadata)
+        # Sanitize other metadata fields as well
+        doc.metadata = sanitize_metadata_for_db(doc.metadata)
+        if hasattr(doc, 'additional_metadata'):
+            doc.additional_metadata = sanitize_metadata_for_db(doc.additional_metadata)
 
         # 11. Store chunks and update document with is_update=True
         store_start = time.time()
@@ -663,16 +674,19 @@ async def process_ingestion_job(
                 doc = await database.get_document(document_id, auth)
 
                 if doc:
+                    # Sanitize error message before storing
+                    sanitized_error = sanitize_text_for_db(str(e))
+                    
                     # Update the document status to failed
                     await database.update_document(
                         document_id=document_id,
                         updates={
-                            "system_metadata": {
+                            "system_metadata": sanitize_metadata_for_db({
                                 **doc.system_metadata,
                                 "status": "failed",
-                                "error": str(e),
+                                "error": sanitized_error,
                                 "updated_at": datetime.now(UTC),
-                            }
+                            })
                         },
                         auth=auth,
                     )
