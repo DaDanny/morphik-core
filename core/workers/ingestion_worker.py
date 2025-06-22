@@ -739,7 +739,7 @@ async def process_ingestion_job(
         colpali_embed_start = time.time()
         chunk_objects_multivector = []
         
-        if using_colpali:
+        if False:
             logger.info(f"   📊 Multivector chunks to embed: {len(processed_chunks_multivector)}")
             logger.info("   🔄 Starting ColPali embedding generation...")
             
